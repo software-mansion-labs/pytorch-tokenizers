@@ -20,6 +20,7 @@
 
 // Local
 #include <pytorch/tokenizers/error.h>
+#include <pytorch/tokenizers/map_utils.h>
 #include <pytorch/tokenizers/regex.h>
 #include <pytorch/tokenizers/result.h>
 #include <pytorch/tokenizers/special_token_matcher.h>
@@ -30,75 +31,6 @@
 
 namespace tokenizers {
 namespace detail {
-
-using TokenMap = StringIntegerMap<>;
-
-template <typename TToken, typename TRank>
-static Result<TokenMap> build_token_map(
-    std::vector<std::pair<TToken, TRank>> container) {
-  static_assert(
-      std::is_same_v<TToken, std::string> ||
-          std::is_same_v<TToken, std::string_view>,
-      "TToken must be std::string or std::string_view");
-  static_assert(
-      std::is_integral_v<TRank> && std::is_unsigned_v<TRank>,
-      "TRank must be an unsigned integer");
-
-  return TokenMap::create(container);
-};
-
-template <typename TContainer, typename TTokenAccessor, typename TRankAccessor>
-static Result<TokenMap> build_token_map(
-    const TContainer& container,
-    TTokenAccessor token_accessor,
-    TRankAccessor rank_accessor) {
-  using TokenType = std::invoke_result_t<TTokenAccessor, const TContainer&>;
-  using RankType = std::invoke_result_t<TRankAccessor, const TContainer&>;
-
-  static_assert(
-      std::is_same_v<TokenType, std::string> ||
-          std::is_same_v<TokenType, std::string_view>,
-      "TokenType must be std::string or std::string_view");
-  static_assert(
-      std::is_integral_v<RankType> && std::is_unsigned_v<RankType>,
-      "RankType must be an unsigned integer");
-
-  std::vector<std::pair<TokenType, RankType>> pairs;
-  pairs.reserve(container.size());
-  for (const auto& value : container) {
-    pairs.emplace_back(token_accessor(value), rank_accessor(value));
-  }
-
-  return build_token_map(std::move(pairs));
-}
-
-inline Result<std::unique_ptr<IRegex>> build_special_token_regex(
-    const TokenMap& special_token_map) {
-  const std::size_t count = special_token_map.size();
-  if (count == 0) {
-    return static_cast<std::unique_ptr<IRegex>>(nullptr);
-  }
-
-  // Special tokens are a fixed set of literal strings, not a general regex.
-  // Encoding them as an RE2 alternation `(tok1|tok2|...|tokN)` does not scale:
-  // for large added-token vocabularies (e.g. thousands of SID-style tokens)
-  // the alternation exceeds RE2's DFA memory budget and falls back to the slow
-  // NFA engine, dominating encode latency. A trie matcher matches in
-  // O(text_len * max_token_len), independent of vocabulary size (see
-  // SpecialTokenMatcher), and returns non-overlapping leftmost-longest matches
-  // — identical to the alternation whenever no special token is a prefix of
-  // another (always true for SID and standard chat-marker vocabularies) and
-  // matching HuggingFace AddedVocabulary semantics otherwise.
-  std::vector<std::string> tokens;
-  tokens.reserve(count);
-  for (std::size_t i = 0; i < count; ++i) {
-    const auto& [token, _] = special_token_map.getElement(i);
-    tokens.emplace_back(token);
-  }
-  std::unique_ptr<IRegex> matcher =
-      std::make_unique<SpecialTokenMatcher>(tokens);
-  return matcher;
-}
 
 class BPETokenizerBase : public Tokenizer {
  public:

@@ -150,20 +150,18 @@ Error Tiktoken::load(const std::string& path) {
     return special_token_map_result.error();
   }
 
-  auto special_token_regex_result =
-      detail::build_special_token_regex(*special_token_map_result);
-  if (!special_token_regex_result.ok()) {
-    return special_token_regex_result.error();
-  }
-
-  special_token_map_.emplace(std::move(*special_token_map_result));
-
   auto regex_result = _create_regex(_pattern);
   if (!regex_result.ok()) {
     return regex_result.error();
   }
   _regex = std::move(*regex_result);
+  auto special_token_regex_result =
+      detail::build_special_token_regex(*special_token_map_result);
+  if (!special_token_regex_result.ok()) {
+    return special_token_regex_result.error();
+  }
   special_token_regex_ = std::move(*special_token_regex_result);
+  special_token_map_.emplace(std::move(*special_token_map_result));
 
   // initialize vocab_size, bos_tok, eos_tok
   vocab_size_ = token_map_->size() + special_token_map_->size();

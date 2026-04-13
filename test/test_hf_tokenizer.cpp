@@ -201,7 +201,7 @@ TEST(HFTokenizerTest, TestDecodeBatch) {
   // Note: in hf_tokenizer_dir, bos is 128000
   uint64_t bos = tokenizer.bos_tok();
   std::vector<uint64_t> tokens = {bos, 8, 9};
-
+  
   // skip_special_tokens = false
   auto result_false = tokenizer.decode(tokens, false);
   EXPECT_TRUE(result_false.ok());
