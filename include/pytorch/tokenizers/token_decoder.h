@@ -90,6 +90,18 @@ class TokenDecoderConfig {
   TOKEN_DECODER_CONFIG_MEMBER(std::string, wordpiece_prefix)
   TOKEN_DECODER_CONFIG_MEMBER(bool, wordpiece_cleanup)
 
+  // Parameters for Metaspace decoder
+  TOKEN_DECODER_CONFIG_MEMBER(std::string, metaspace_replacement)
+  TOKEN_DECODER_CONFIG_MEMBER(std::string, metaspace_prepend_scheme)
+
+  // Parameters for BPE decoder
+  TOKEN_DECODER_CONFIG_MEMBER(std::string, bpe_suffix)
+
+  // Parameters for CTC decoder
+  TOKEN_DECODER_CONFIG_MEMBER(std::string, ctc_pad_token)
+  TOKEN_DECODER_CONFIG_MEMBER(std::string, ctc_word_delimiter_token)
+  TOKEN_DECODER_CONFIG_MEMBER(bool, ctc_cleanup)
+
   /*----------------*/
   /* Public methods */
   /*----------------*/
@@ -204,5 +216,60 @@ class SequenceTokenDecoder : public TokenDecoder {
  private:
   std::vector<TokenDecoder::Ptr> decoders_;
 }; // end class SequenceTokenDecoder
+
+// -- Metaspace ----------------------------------------------------------------
+// Replaces the replacement character (▁) with space and handles prepend.
+
+class MetaspaceTokenDecoder : public TokenDecoder {
+ public:
+  explicit MetaspaceTokenDecoder(
+      const std::string& replacement = "\xe2\x96\x81",
+      const std::string& prepend_scheme = "always")
+      : replacement_(replacement), prepend_scheme_(prepend_scheme) {}
+
+  std::vector<std::string> decode(
+      const std::vector<std::string>& tokens) const override;
+
+ private:
+  std::string replacement_;
+  std::string prepend_scheme_;
+};
+
+// -- BPE ----------------------------------------------------------------------
+// Handles end-of-word suffix (e.g. </w>).
+
+class BPETokenDecoder : public TokenDecoder {
+ public:
+  explicit BPETokenDecoder(const std::string& suffix = "</w>")
+      : suffix_(suffix) {}
+
+  std::vector<std::string> decode(
+      const std::vector<std::string>& tokens) const override;
+
+ private:
+  std::string suffix_;
+};
+
+// -- CTC ----------------------------------------------------------------------
+// Connectionist Temporal Classification decoder for speech models.
+
+class CTCTokenDecoder : public TokenDecoder {
+ public:
+  explicit CTCTokenDecoder(
+      const std::string& pad_token = "<pad>",
+      const std::string& word_delimiter_token = "|",
+      bool cleanup = true)
+      : pad_token_(pad_token),
+        word_delimiter_token_(word_delimiter_token),
+        cleanup_(cleanup) {}
+
+  std::vector<std::string> decode(
+      const std::vector<std::string>& tokens) const override;
+
+ private:
+  std::string pad_token_;
+  std::string word_delimiter_token_;
+  bool cleanup_;
+};
 
 } // namespace tokenizers

@@ -52,7 +52,6 @@ TokenDecoder::Ptr TokenDecoderConfig::create() const {
     return TokenDecoder::Ptr(new WordPieceTokenDecoder(
         wordpiece_prefix.value_or("##"), wordpiece_cleanup.value_or(true)));
   } else if (type == "Sequence") {
-    // Parse the decoders array from JSON and create sub-decoders
     std::vector<TokenDecoder::Ptr> decoders;
     if (sequence_decoders) {
       for (const auto& decoder_json : *sequence_decoders) {
@@ -62,6 +61,18 @@ TokenDecoder::Ptr TokenDecoderConfig::create() const {
       }
     }
     return TokenDecoder::Ptr(new SequenceTokenDecoder(std::move(decoders)));
+  } else if (type == "Metaspace") {
+    return TokenDecoder::Ptr(new MetaspaceTokenDecoder(
+        metaspace_replacement.value_or("\xe2\x96\x81"),
+        metaspace_prepend_scheme.value_or("always")));
+  } else if (type == "BPEDecoder") {
+    return TokenDecoder::Ptr(
+        new BPETokenDecoder(bpe_suffix.value_or("</w>")));
+  } else if (type == "CTC") {
+    return TokenDecoder::Ptr(new CTCTokenDecoder(
+        ctc_pad_token.value_or("<pad>"),
+        ctc_word_delimiter_token.value_or("|"),
+        ctc_cleanup.value_or(true)));
   }
   throw std::runtime_error("Unsupported TokenDecoder type: " + type);
 }
@@ -95,13 +106,39 @@ TokenDecoderConfig& TokenDecoderConfig::parse_json(const json& json_config) {
     set_strip_start(json_config.value("start", 0));
     set_strip_stop(json_config.value("stop", 0));
   } else if (type == "Sequence") {
-    // Parse decoders array for Sequence decoder
     if (json_config.contains("decoders")) {
       std::vector<json> decoders;
       for (const auto& d : json_config["decoders"]) {
         decoders.push_back(d);
       }
       set_sequence_decoders(std::move(decoders));
+    }
+  } else if (type == "Metaspace") {
+    if (json_config.contains("replacement")) {
+      set_metaspace_replacement(
+          json_config["replacement"].get<std::string>());
+    }
+    if (json_config.contains("prepend_scheme")) {
+      set_metaspace_prepend_scheme(
+          json_config["prepend_scheme"].get<std::string>());
+    } else if (json_config.contains("add_prefix_space")) {
+      bool aps = json_config["add_prefix_space"].get<bool>();
+      set_metaspace_prepend_scheme(aps ? "always" : "never");
+    }
+  } else if (type == "BPEDecoder") {
+    if (json_config.contains("suffix")) {
+      set_bpe_suffix(json_config["suffix"].get<std::string>());
+    }
+  } else if (type == "CTC") {
+    if (json_config.contains("pad_token")) {
+      set_ctc_pad_token(json_config["pad_token"].get<std::string>());
+    }
+    if (json_config.contains("word_delimiter_token")) {
+      set_ctc_word_delimiter_token(
+          json_config["word_delimiter_token"].get<std::string>());
+    }
+    if (json_config.contains("cleanup")) {
+      set_ctc_cleanup(json_config["cleanup"].get<bool>());
     }
   } else {
     throw std::runtime_error("Unsupported TokenDecoder type: " + type);
@@ -374,6 +411,106 @@ std::vector<std::string> WordPieceTokenDecoder::decode(
   }
 
   return decoded_tokens;
+}
+
+// MetaspaceTokenDecoder ///////////////////////////////////////////////////////
+
+std::vector<std::string> MetaspaceTokenDecoder::decode(
+    const std::vector<std::string>& tokens) const {
+  std::vector<std::string> decoded;
+  decoded.reserve(tokens.size());
+
+  for (size_t i = 0; i < tokens.size(); ++i) {
+    std::string token = tokens[i];
+
+    // Replace all occurrences of the replacement char with space.
+    size_t pos = 0;
+    while ((pos = token.find(replacement_, pos)) != std::string::npos) {
+      token.replace(pos, replacement_.length(), " ");
+      pos += 1;
+    }
+
+    // For the first token, strip the leading space that was added by prepend.
+    if (i == 0 && prepend_scheme_ != "never") {
+      if (!token.empty() && token[0] == ' ') {
+        token.erase(0, 1);
+      }
+    }
+
+    decoded.push_back(std::move(token));
+  }
+  return decoded;
+}
+
+// BPETokenDecoder /////////////////////////////////////////////////////////////
+
+std::vector<std::string> BPETokenDecoder::decode(
+    const std::vector<std::string>& tokens) const {
+  std::vector<std::string> decoded;
+  decoded.reserve(tokens.size());
+
+  for (size_t i = 0; i < tokens.size(); ++i) {
+    std::string token = tokens[i];
+
+    // Remove the end-of-word suffix and add a space after the word.
+    if (token.size() >= suffix_.size() &&
+        token.compare(token.size() - suffix_.size(), suffix_.size(), suffix_) ==
+            0) {
+      token = token.substr(0, token.size() - suffix_.size());
+      if (i + 1 < tokens.size()) {
+        token += " ";
+      }
+    }
+
+    decoded.push_back(std::move(token));
+  }
+  return decoded;
+}
+
+// CTCTokenDecoder /////////////////////////////////////////////////////////////
+
+std::vector<std::string> CTCTokenDecoder::decode(
+    const std::vector<std::string>& tokens) const {
+  std::vector<std::string> decoded;
+  decoded.reserve(tokens.size());
+  std::string prev;
+
+  for (const auto& token : tokens) {
+    // Skip pad tokens.
+    if (token == pad_token_) {
+      continue;
+    }
+    // Skip consecutive duplicate tokens (CTC blank collapsing).
+    if (token == prev) {
+      continue;
+    }
+    prev = token;
+
+    // Replace word delimiter with space.
+    if (token == word_delimiter_token_) {
+      decoded.push_back(" ");
+      continue;
+    }
+
+    decoded.push_back(token);
+  }
+
+  // Cleanup: join and clean up spaces.
+  if (cleanup_) {
+    std::string joined;
+    for (const auto& t : decoded) {
+      joined += t;
+    }
+    // Trim leading/trailing spaces.
+    size_t start = joined.find_first_not_of(' ');
+    if (start == std::string::npos) {
+      return {""};
+    }
+    size_t end = joined.find_last_not_of(' ');
+    return {joined.substr(start, end - start + 1)};
+  }
+
+  return decoded;
 }
 
 } // end  namespace tokenizers
