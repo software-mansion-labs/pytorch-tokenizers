@@ -6,162 +6,219 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-// A tokenizer that works with sentencepiece.
-
 #include <pytorch/tokenizers/sentencepiece.h>
+
 #include <cinttypes>
 #include <string>
-#include "third_party/absl/strings/str_replace.h"
+
+#include <pytorch/tokenizers/log.h>
+#include "sentencepiece_processor.h"
+
 namespace tokenizers {
-const char kSpaceSymbol[] = "\xe2\x96\x81";
+
+// ▁ (U+2581 LOWER ONE EIGHTH BLOCK) — the SentencePiece space marker.
+static const std::string kSpaceSymbol = "\xe2\x96\x81";
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+/// Replace every occurrence of `from` with `to` in `str`, in-place.
+static void replace_all(
+    std::string& str,
+    const std::string& from,
+    const std::string& to) {
+  size_t pos = 0;
+  while ((pos = str.find(from, pos)) != std::string::npos) {
+    str.replace(pos, from.size(), to);
+    pos += to.size();
+  }
+}
+
+/// Decode a single byte-token piece like "<0x0A>" → "\n".
+/// Returns true (and overwrites `piece`) when the piece matched the pattern.
+static bool try_decode_byte_token(std::string& piece) {
+  // Byte tokens are exactly 6 chars: <0xHH>
+  if (piece.size() != 6 || piece[0] != '<' || piece[1] != '0' ||
+      piece[2] != 'x' || piece[5] != '>') {
+    return false;
+  }
+  unsigned int byte_val = 0;
+  if (std::sscanf(piece.c_str(), "<0x%02X>", &byte_val) == 1) {
+    piece = std::string(1, static_cast<char>(byte_val));
+    return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// lifetime
+// ---------------------------------------------------------------------------
 
 SPTokenizer::SPTokenizer()
     : Tokenizer(),
-      _processor(std::make_unique<sentencepiece::SentencePieceProcessor>()) {}
+      processor_(std::make_unique<sentencepiece::SentencePieceProcessor>()) {}
 
-/**
- * @brief Load the tokenizer from a file. The tokenizer file contains the
- * vocabulary and scores. The format is: the first integer is the maximum
- * token length, followed by a list of (word_len, word) pairs. Here we
- * are reading all the vocabulary into memory and keep it sorted for fast
- * lookup.
- *
- * @param tokenizer_path The path to the tokenizer file.
- * @return Error
- */
+SPTokenizer::~SPTokenizer() = default;
+
+// ---------------------------------------------------------------------------
+// load
+// ---------------------------------------------------------------------------
+
 Error SPTokenizer::load(const std::string& tokenizer_path) {
   if (initialized_) {
-    fprintf(stderr, "Tokenizer already initialized.\n");
+    TK_LOG(Info, "Tokenizer already initialized");
     return Error::Ok;
   }
-  // read in the file
-  const auto status = _processor->Load(tokenizer_path);
+  const auto status = processor_->Load(tokenizer_path);
   if (!status.ok()) {
-    fprintf(
-        stderr,
-        "couldn't load %s. \nError message: \n%s\n"
-        "It is likely that the tokenizer artifact is "
-        "broken or of a different format.",
+    TK_LOG(
+        Error,
+        "Failed to load %s: %s",
         tokenizer_path.c_str(),
         status.error_message());
     return Error::LoadFailure;
   }
-  // load vocab_size, bos_tok, eos_tok
-  vocab_size_ = _processor->GetPieceSize();
-  bos_tok_ = _processor->bos_id();
-  eos_tok_ = _processor->eos_id();
-  unk_tok_ = _processor->unk_id(); // Explicitly set unk_tok_
+  vocab_size_ = processor_->GetPieceSize();
+  bos_tok_ = processor_->bos_id();
+  eos_tok_ = processor_->eos_id();
+  unk_tok_ = processor_->unk_id();
   initialized_ = true;
   return Error::Ok;
 }
 
-SPTokenizer::~SPTokenizer() {}
+// ---------------------------------------------------------------------------
+// vocabulary queries
+// ---------------------------------------------------------------------------
 
 Result<std::string> SPTokenizer::id_to_piece(uint64_t token) const {
   if (!initialized_) {
-    fprintf(stderr, "Tokenizer not initialized\n");
     return Error::Uninitialized;
   }
   if (token >= static_cast<uint64_t>(vocab_size_)) {
     return Error::OutOfRange;
   }
-  return _processor->IdToPiece(static_cast<int>(token));
+  return processor_->IdToPiece(static_cast<int>(token));
 }
 
 Result<uint64_t> SPTokenizer::piece_to_id(const std::string& text) const {
   if (!initialized_) {
-    fprintf(stderr, "Tokenizer not initialized\n");
     return Error::Uninitialized;
   }
-  int32_t id = _processor->PieceToId(text);
-  if (id == _processor->unk_id()) {
-    // Check if the piece is actually the unk token itself.
-    // In SentencePiece, unk_id() can be a valid token if the piece itself is
-    // "<unk>"
-    if (text == _processor->IdToPiece(id)) {
+  int32_t id = processor_->PieceToId(text);
+  if (id == processor_->unk_id()) {
+    // PieceToId returns unk_id for unknown pieces, but the unk piece itself
+    // (e.g. "<unk>") is a legitimate lookup — disambiguate.
+    if (text == processor_->IdToPiece(id)) {
       return static_cast<uint64_t>(id);
     }
-    fprintf(stderr, "Piece '%s' not found in vocabulary\n", text.c_str());
     return Error::OutOfRange;
   }
   return static_cast<uint64_t>(id);
 }
 
-/**
- * @brief Decode a token into string.
- *
- * @param prev_token The previous token.
- * @param token The current token.
- * @return Result<std::string> The string representation of the
- * token.
- */
-Result<std::string> SPTokenizer::decode(
-    uint64_t prev_token,
-    uint64_t token,
-    bool skip_special_tokens) const {
-  (void)skip_special_tokens; // Mark as unused
-  if (!initialized_) {
-    fprintf(stderr, "Tokenizer not initialized\n");
-    return Error::Uninitialized;
-  }
-  // get rid of the control ids <s> and </s>
-  if (_processor->IsControl(token)) {
-    // NB: returning empty string doesn't work for some reason. It causes
-    // free(): invalid pointer error.
-    return std::string(" ");
-  }
+// ---------------------------------------------------------------------------
+// encode
+// ---------------------------------------------------------------------------
 
-  std::string result =
-      absl::StrReplaceAll(_processor->IdToPiece(token), {{kSpaceSymbol, " "}});
-
-  // following BOS token, sentencepiece decoder strips any leading
-  // whitespace
-  if (prev_token == bos_tok_ && result[0] == ' ') {
-    result = result.substr(1);
-  }
-
-  // handle <0x0A>
-  result = absl::StrReplaceAll(result, {{"<0x0A>", "\n"}});
-
-  return result;
-}
-
-/**
- * @brief Encode a string into a sequence of tokens.
- *
- * @param text The string to be encoded.
- * @param bos The number of BOS to prepend to the token list.
- * @param eos The number of EOS to append to the token list.
- * @return Result<std::vector<uint64_t>>
- */
 Result<std::vector<uint64_t>>
 SPTokenizer::encode(const std::string& text, int8_t bos, int8_t eos) const {
   if (!initialized_) {
-    fprintf(stderr, "Tokenizer not initialized\n");
     return Error::Uninitialized;
   }
-  // workaround a weird issue that text doesn't have correct size()
-  std::string input(text.c_str());
-  // should we reserve memory?
-  std::vector<int> res;
-  auto status = _processor->Encode(input, &res);
+
+  std::vector<int> sp_ids;
+  auto status = processor_->Encode(text, &sp_ids);
   if (!status.ok()) {
-    fprintf(stderr, "couldn't encode %s\n", text.c_str());
+    TK_LOG(Error, "Failed to encode input");
     return Error::EncodeFailure;
   }
 
   std::vector<uint64_t> tokens;
-  for (auto i = 0; i < bos; ++i) {
+  tokens.reserve(static_cast<size_t>(bos) + sp_ids.size() + eos);
+
+  for (int8_t i = 0; i < bos; ++i) {
     tokens.push_back(bos_tok_);
   }
-
-  for (auto i = 0; i < res.size(); ++i) {
-    tokens.push_back(res[i]);
+  for (int id : sp_ids) {
+    tokens.push_back(static_cast<uint64_t>(id));
   }
-
-  for (auto i = 0; i < eos; ++i) {
+  for (int8_t i = 0; i < eos; ++i) {
     tokens.push_back(eos_tok_);
   }
   return tokens;
 }
+
+// ---------------------------------------------------------------------------
+// decode — streaming (single token)
+// ---------------------------------------------------------------------------
+
+Result<std::string> SPTokenizer::decode(
+    uint64_t prev_token,
+    uint64_t token,
+    bool skip_special_tokens) const {
+  if (!initialized_) {
+    return Error::Uninitialized;
+  }
+
+  int id = static_cast<int>(token);
+
+  // Control tokens (BOS, EOS, PAD, …) have no text representation.
+  if (processor_->IsControl(id)) {
+    if (skip_special_tokens) {
+      return std::string("");
+    }
+    // Even when not skipping, control tokens are silent in decoded output.
+    return std::string("");
+  }
+
+  std::string piece = processor_->IdToPiece(id);
+
+  // Byte tokens: <0x0A> → '\n', etc.
+  if (processor_->IsByte(id)) {
+    try_decode_byte_token(piece);
+    return piece;
+  }
+
+  // Replace ▁ with space.
+  replace_all(piece, kSpaceSymbol, " ");
+
+  // After BOS, SentencePiece convention is to strip the leading space.
+  if (prev_token == bos_tok_ && !piece.empty() && piece[0] == ' ') {
+    piece.erase(0, 1);
+  }
+
+  return piece;
+}
+
+// ---------------------------------------------------------------------------
+// decode — batch
+// ---------------------------------------------------------------------------
+
+Result<std::string> SPTokenizer::decode(
+    const std::vector<uint64_t>& tokens,
+    bool skip_special_tokens) const {
+  if (!initialized_) {
+    return Error::Uninitialized;
+  }
+
+  std::vector<int> ids;
+  ids.reserve(tokens.size());
+  for (uint64_t t : tokens) {
+    if (skip_special_tokens &&
+        processor_->IsControl(static_cast<int>(t))) {
+      continue;
+    }
+    ids.push_back(static_cast<int>(t));
+  }
+
+  std::string result;
+  auto status = processor_->Decode(ids, &result);
+  if (!status.ok()) {
+    TK_LOG(Error, "Failed to decode token sequence");
+    return Error::DecodeFailure;
+  }
+  return result;
+}
+
 } // namespace tokenizers
