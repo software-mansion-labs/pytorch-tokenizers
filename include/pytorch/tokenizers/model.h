@@ -143,6 +143,11 @@ class ModelConfig {
   MODEL_CONFIG_MEMBER(std::string, continuing_subword_prefix)
   MODEL_CONFIG_MEMBER(size_t, max_input_chars_per_word)
 
+  // Data for UnigramModel
+  using UnigramVocab = std::vector<std::pair<std::string, double>>;
+  MODEL_CONFIG_MEMBER(UnigramVocab, unigram_vocab)
+  MODEL_CONFIG_MEMBER(size_t, unigram_unk_id)
+
   // Paths for extra config files (HuggingFace specific)
   MODEL_CONFIG_MEMBER(std::string, model_config_path)
   MODEL_CONFIG_MEMBER(std::string, special_tokens_map_path)
