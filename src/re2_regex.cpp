@@ -11,7 +11,16 @@
 namespace tokenizers {
 
 Error Re2Regex::compile(const std::string& pattern) {
-  regex_ = std::make_unique<re2::RE2>(pattern);
+  re2::RE2::Options options;
+  // Scale DFA memory with pattern size. RE2's default 8MB is fine for most
+  // tokenizers, but models with thousands of special tokens (e.g. Gemma3
+  // with 6415 added tokens) produce ~100KB alternation patterns whose DFA
+  // can require 10x+ the default memory.
+  int64_t min_mem = 8 << 20; // 8MB floor (RE2 default)
+  int64_t scaled = static_cast<int64_t>(pattern.size()) * 128;
+  options.set_max_mem(std::max(min_mem, scaled));
+  options.set_log_errors(false); // suppress RE2 DFA warnings to stderr
+  regex_ = std::make_unique<re2::RE2>(pattern, options);
   // Warmup re2 as it is slow on the first run, void the return value as it's
   // not needed Refer to
   // https://github.com/google/re2/blob/6dcd83d60f7944926bfd308cc13979fc53dd69ca/re2/fuzzing/re2_fuzzer.cc#L136-L141
