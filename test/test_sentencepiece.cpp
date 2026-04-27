@@ -114,7 +114,7 @@ TEST(SPTokenizerTest, TestDecode) {
   }
 }
 
-TEST(SPTokenizerTest, TestDecodeSpecialTokens) {
+TEST(SPTokenizerTest, TestDecodeControlTokens) {
   SPTokenizer tokenizer;
   auto path = _get_resource_path("test_sentencepiece.model");
   auto error = tokenizer.load(path);
@@ -122,17 +122,53 @@ TEST(SPTokenizerTest, TestDecodeSpecialTokens) {
 
   uint64_t bos = tokenizer.bos_tok();
 
-  // skip_special_tokens = false
+  // Control tokens produce empty string regardless of skip_special_tokens.
   auto res_false = tokenizer.decode(0, bos, false);
   EXPECT_TRUE(res_false.ok());
-  // SPTokenizer returns " " for control tokens like BOS/EOS
-  EXPECT_EQ(res_false.get(), " ");
+  EXPECT_EQ(res_false.get(), "");
 
-  // skip_special_tokens = true
-  // SPTokenizer ignores the skip_special_tokens flag
   auto res_true = tokenizer.decode(0, bos, true);
   EXPECT_TRUE(res_true.ok());
-  EXPECT_EQ(res_true.get(), " ");
+  EXPECT_EQ(res_true.get(), "");
+}
+
+TEST(SPTokenizerTest, TestBatchDecode) {
+  SPTokenizer tokenizer;
+  auto path = _get_resource_path("test_sentencepiece.model");
+  auto error = tokenizer.load(path);
+  EXPECT_EQ(error, Error::Ok);
+
+  // Encode "Hello world!" with BOS
+  std::vector<uint64_t> tokens = {1, 15043, 3186, 29991};
+
+  // Batch decode without skipping special tokens — BOS is still silent
+  // because SP's Decode handles control tokens internally.
+  auto result = tokenizer.decode(tokens, false);
+  EXPECT_TRUE(result.ok());
+  // SP's Decode produces the original text (BOS is a control token,
+  // stripped by the library).
+  EXPECT_EQ(result.get(), "Hello world!");
+
+  // Batch decode with skip_special_tokens — same result since we
+  // explicitly filter control tokens before passing to SP.
+  auto result_skip = tokenizer.decode(tokens, true);
+  EXPECT_TRUE(result_skip.ok());
+  EXPECT_EQ(result_skip.get(), "Hello world!");
+}
+
+TEST(SPTokenizerTest, TestBatchDecodeRoundTrip) {
+  SPTokenizer tokenizer;
+  auto path = _get_resource_path("test_sentencepiece.model");
+  auto error = tokenizer.load(path);
+  EXPECT_EQ(error, Error::Ok);
+
+  std::string input = "The quick brown fox jumps over the lazy dog.";
+  auto enc = tokenizer.encode(input, /*bos*/ 0, /*eos*/ 0);
+  EXPECT_TRUE(enc.ok());
+
+  auto dec = tokenizer.decode(enc.get(), false);
+  EXPECT_TRUE(dec.ok());
+  EXPECT_EQ(dec.get(), input);
 }
 
 TEST(SPTokenizerTest, TestIdToPiece) {

@@ -7,15 +7,25 @@
  */
 // @lint-ignore-every LICENSELINT
 
-// A tokenizer that works with sentencepiece. Used by Llama2.
 #pragma once
 
 #include <pytorch/tokenizers/tokenizer.h>
 #include <memory>
 #include <vector>
-#include "sentencepiece_processor.h"
+
+// Forward-declare to avoid leaking sentencepiece headers to consumers.
+namespace sentencepiece {
+class SentencePieceProcessor;
+} // namespace sentencepiece
+
 namespace tokenizers {
 
+/**
+ * Tokenizer backed by Google's SentencePiece library.
+ *
+ * Loads `.model` (protobuf) files produced by the SentencePiece trainer.
+ * Used by Llama 2/3, Gemma, T5, ALBERT, XLNet, Mistral, and many others.
+ */
 class SPTokenizer : public Tokenizer {
  public:
   explicit SPTokenizer();
@@ -29,13 +39,19 @@ class SPTokenizer : public Tokenizer {
   Result<std::vector<uint64_t>>
   encode(const std::string& input, int8_t bos, int8_t eos) const override;
 
+  /// Streaming single-token decode (for incremental inference).
   Result<std::string> decode(
       uint64_t prev_token,
       uint64_t token,
       bool skip_special_tokens = false) const override;
 
+  /// Batch decode: converts a full token sequence back to text.
+  Result<std::string> decode(
+      const std::vector<uint64_t>& tokens,
+      bool skip_special_tokens = false) const;
+
  private:
-  std::unique_ptr<sentencepiece::SentencePieceProcessor> _processor;
+  std::unique_ptr<sentencepiece::SentencePieceProcessor> processor_;
 };
 
 } // namespace tokenizers
