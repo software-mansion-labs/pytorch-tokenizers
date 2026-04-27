@@ -15,6 +15,8 @@
 #include <pytorch/tokenizers/bpe_model.h>
 #include <pytorch/tokenizers/log.h>
 #include <pytorch/tokenizers/map_utils.h>
+#include <pytorch/tokenizers/unigram_model.h>
+#include <pytorch/tokenizers/wordlevel_model.h>
 #include <pytorch/tokenizers/wordpiece_model.h>
 
 namespace tokenizers {
@@ -191,12 +193,50 @@ SequenceTokenIds resolve_sequence_tokens(
 ModelConfig& ModelConfig::parse_json(const nlohmann::json& json_config) {
   if (json_config.contains("model") && !json_config.at("model").is_null()) {
     const auto& model_json = json_config.at("model");
+
+    // Read explicit type if present.
     if (model_json.contains("type")) {
       type = model_json.at("type").get<std::string>();
     }
 
-    // Common vocab parsing
-    parse_tokens(*this, model_json);
+    // Infer type from JSON structure when "type" is missing.
+    // Older HuggingFace tokenizer.json files omit the type field.
+    if (type.empty() && model_json.contains("vocab")) {
+      const auto& vocab_json = model_json.at("vocab");
+      bool has_merges = model_json.contains("merges");
+      bool has_unk_id = model_json.contains("unk_id");
+
+      if (has_unk_id && vocab_json.is_array() && !vocab_json.empty() &&
+          vocab_json[0].is_array() && vocab_json[0].size() == 2 &&
+          vocab_json[0][1].is_number_float()) {
+        // Array of [string, float] pairs + unk_id → Unigram
+        // The float scores are the distinguishing feature of Unigram vocab.
+        type = "Unigram";
+      } else if (has_merges) {
+        // Has merges → BPE (regardless of vocab format)
+        type = "BPE";
+      } else if (vocab_json.is_object() &&
+                 model_json.contains("continuing_subword_prefix")) {
+        // Dict vocab + continuing_subword_prefix → WordPiece
+        type = "WordPiece";
+      } else if (vocab_json.is_object()) {
+        // Dict vocab, no merges, no subword prefix → WordLevel
+        type = "WordLevel";
+      }
+
+      if (!type.empty()) {
+        TK_LOG(
+            Info,
+            "Model type not specified in tokenizer.json, inferred as: %s",
+            type.c_str());
+      }
+    }
+
+    // Parse vocab for non-Unigram models (dict format: {"token": id}).
+    // Unigram uses a different format parsed below.
+    if (type != "Unigram") {
+      parse_tokens(*this, model_json);
+    }
 
     // Common config parsing
     if (model_json.contains("unk_token") &&
@@ -217,6 +257,25 @@ ModelConfig& ModelConfig::parse_json(const nlohmann::json& json_config) {
       if (model_json.contains("max_input_chars_per_word")) {
         set_max_input_chars_per_word(
             model_json.at("max_input_chars_per_word").get<size_t>());
+      }
+    } else if (type == "WordLevel") {
+      // WordLevel uses the same dict vocab format as BPE/WordPiece (already
+      // parsed above). No merges, no byte_fallback.
+    } else if (type == "Unigram") {
+      if (model_json.contains("vocab")) {
+        std::vector<std::pair<std::string, double>> vocab;
+        for (const auto& entry : model_json.at("vocab")) {
+          vocab.emplace_back(
+              entry[0].get<std::string>(), entry[1].get<double>());
+        }
+        set_unigram_vocab(std::move(vocab));
+      }
+      if (model_json.contains("unk_id") &&
+          !model_json.at("unk_id").is_null()) {
+        set_unigram_unk_id(model_json.at("unk_id").get<size_t>());
+      }
+      if (model_json.contains("byte_fallback")) {
+        set_byte_fallback(model_json.at("byte_fallback").get<bool>());
       }
     }
   }
@@ -322,6 +381,63 @@ Model::Ptr ModelConfig::create() const {
         ids.unk_token_id,
         ids.bos_token_id,
         ids.eos_token_id);
+
+  } else if (type == "Unigram") {
+    const auto& vocab = unigram_vocab.value_or(UnigramVocab{});
+
+    std::vector<std::string> pieces;
+    std::vector<double> scores;
+    pieces.reserve(vocab.size());
+    scores.reserve(vocab.size());
+    for (const auto& [piece, score] : vocab) {
+      pieces.push_back(piece);
+      scores.push_back(score);
+    }
+
+    // Resolve UNK token id: explicit unk_id from JSON, or look up the
+    // unk_token string in the vocab.
+    std::optional<uint64_t> resolved_unk;
+    if (unigram_unk_id) {
+      resolved_unk = static_cast<uint64_t>(*unigram_unk_id);
+    } else if (ids.unk_token_id) {
+      resolved_unk = ids.unk_token_id;
+    }
+
+    // Build special token regex.
+    std::unique_ptr<IRegex> special_token_regex;
+    auto regex_res = detail::build_special_token_regex(special_token_map);
+    if (regex_res.ok()) {
+      special_token_regex = std::move(*regex_res);
+    }
+
+    return std::make_shared<UnigramModel>(
+        std::move(pieces),
+        std::move(scores),
+        std::move(special_token_map),
+        std::move(special_token_regex),
+        byte_fallback.value_or(false),
+        resolved_unk,
+        ids.bos_token_id,
+        ids.eos_token_id,
+        rstrip_tokens,
+        lstrip_tokens);
+
+  } else if (type == "WordLevel") {
+    std::unique_ptr<IRegex> special_token_regex;
+    auto regex_res = detail::build_special_token_regex(special_token_map);
+    if (regex_res.ok()) {
+      special_token_regex = std::move(*regex_res);
+    }
+
+    return std::make_shared<WordLevelModel>(
+        std::move(token_map),
+        std::move(special_token_map),
+        std::move(special_token_regex),
+        ids.unk_token_id,
+        ids.bos_token_id,
+        ids.eos_token_id,
+        rstrip_tokens,
+        lstrip_tokens);
   }
 
   return nullptr;

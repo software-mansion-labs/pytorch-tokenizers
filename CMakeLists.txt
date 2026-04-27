@@ -94,6 +94,8 @@ set(tokenizers_source_files
     ${CMAKE_CURRENT_SOURCE_DIR}/src/token_decoder.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/truncation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/unicode-nfc.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/unigram_model.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/wordlevel_model.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/wordpiece_model.cpp
 )
 
