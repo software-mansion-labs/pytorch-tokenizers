@@ -85,11 +85,28 @@ TEST(ByteFallbackTokenDecoderTest, TestOutOfRangeValues) {
 // Test FuseTokenDecoder
 TEST(FuseTokenDecoderTest, TestPassthrough) {
   FuseTokenDecoder decoder;
-
   EXPECT_EQ(decoder.decode(std::vector<std::string>{"test"})[0], "test");
-  EXPECT_EQ(decoder.decode(std::vector<std::string>{"_Hello"})[0], "_Hello");
-  EXPECT_EQ(decoder.decode(std::vector<std::string>{"<0x41>"})[0], "<0x41>");
-  EXPECT_EQ(decoder.decode(std::vector<std::string>{""})[0], "");
+}
+
+TEST(FuseTokenDecoderTest, TestFuseMultiple) {
+  FuseTokenDecoder decoder;
+  auto result = decoder.decode({"Hel", "lo", " ", "world"});
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_EQ(result[0], "Hello world");
+}
+
+TEST(FuseTokenDecoderTest, TestFuseEmpty) {
+  FuseTokenDecoder decoder;
+  auto result = decoder.decode({});
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_EQ(result[0], "");
+}
+
+TEST(FuseTokenDecoderTest, TestFuseWithSpecialChars) {
+  FuseTokenDecoder decoder;
+  auto result = decoder.decode({"<s>", "Hello", "</s>"});
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_EQ(result[0], "<s>Hello</s>");
 }
 
 // Test SequenceTokenDecoder
@@ -334,6 +351,246 @@ TEST(WordPieceTokenDecoderTest, PunctuationBoundary) {
 
   std::vector<std::string> expected = {"hello", ",", "world"};
   EXPECT_EQ(result, expected);
+}
+
+// =============================================================================
+// ByteLevelTokenDecoder
+// =============================================================================
+
+TEST(ByteLevelTokenDecoderTest, BasicASCII) {
+  ByteLevelTokenDecoder decoder;
+  // GPT-2 byte encoding: 'H' (0x48) maps to 'H', space (0x20) maps to 'Ġ'
+  // The decoder reverses this mapping.
+  // For simple ASCII that maps to itself, input == output
+  auto result = decoder.decode({"Hello"});
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_EQ(result[0], "Hello");
+}
+
+TEST(ByteLevelTokenDecoderTest, ByteEncodedSpace) {
+  ByteLevelTokenDecoder decoder;
+  // unicode_byte_to_utf8(0x20) = "Ġ" — the byte-level space encoding
+  std::string encoded_space = unicode_byte_to_utf8(0x20);
+  auto result = decoder.decode({encoded_space + "Hello"});
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_EQ(result[0], " Hello");
+}
+
+TEST(ByteLevelTokenDecoderTest, MultipleTokens) {
+  ByteLevelTokenDecoder decoder;
+  std::string sp = unicode_byte_to_utf8(0x20);
+  auto result = decoder.decode({sp + "Hello", sp + "world"});
+  // ByteLevel decoder fuses all tokens into one string
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_EQ(result[0], " Hello world");
+}
+
+// =============================================================================
+// MetaspaceTokenDecoder
+// =============================================================================
+
+TEST(MetaspaceTokenDecoderTest, Basic) {
+  MetaspaceTokenDecoder decoder;
+  std::vector<std::string> tokens = {
+      "\xe2\x96\x81Hello", "\xe2\x96\x81world", "!"};
+  auto result = decoder.decode(tokens);
+  ASSERT_EQ(result.size(), 3);
+  EXPECT_EQ(result[0], "Hello"); // Leading ▁ stripped on first token
+  EXPECT_EQ(result[1], " world");
+  EXPECT_EQ(result[2], "!");
+}
+
+TEST(MetaspaceTokenDecoderTest, NeverPrepend) {
+  MetaspaceTokenDecoder decoder("\xe2\x96\x81", "never");
+  std::vector<std::string> tokens = {
+      "\xe2\x96\x81Hello", "\xe2\x96\x81world"};
+  auto result = decoder.decode(tokens);
+  ASSERT_EQ(result.size(), 2);
+  // With "never" prepend_scheme, don't strip leading space on first token
+  EXPECT_EQ(result[0], " Hello");
+  EXPECT_EQ(result[1], " world");
+}
+
+TEST(MetaspaceTokenDecoderTest, Empty) {
+  MetaspaceTokenDecoder decoder;
+  auto result = decoder.decode({});
+  EXPECT_TRUE(result.empty());
+}
+
+TEST(MetaspaceTokenDecoderTest, FromJson) {
+  nlohmann::json config = {
+      {"type", "Metaspace"},
+      {"replacement", "\xe2\x96\x81"},
+      {"prepend_scheme", "always"}};
+  TokenDecoderConfig dec_config;
+  dec_config.parse_json(config);
+  auto decoder = dec_config.create();
+  auto result =
+      decoder->decode({"\xe2\x96\x81Hello", "\xe2\x96\x81world"});
+  ASSERT_EQ(result.size(), 2);
+  EXPECT_EQ(result[0], "Hello");
+  EXPECT_EQ(result[1], " world");
+}
+
+// =============================================================================
+// BPETokenDecoder
+// =============================================================================
+
+TEST(BPETokenDecoderTest, Basic) {
+  BPETokenDecoder decoder("</w>");
+  std::vector<std::string> tokens = {"Hel", "lo</w>", "world</w>"};
+  auto result = decoder.decode(tokens);
+  ASSERT_EQ(result.size(), 3);
+  EXPECT_EQ(result[0], "Hel");
+  EXPECT_EQ(result[1], "lo "); // suffix removed, space added
+  EXPECT_EQ(result[2], "world"); // last token, no trailing space
+}
+
+TEST(BPETokenDecoderTest, NoSuffix) {
+  BPETokenDecoder decoder("</w>");
+  std::vector<std::string> tokens = {"hello", "world"};
+  auto result = decoder.decode(tokens);
+  EXPECT_EQ(result[0], "hello");
+  EXPECT_EQ(result[1], "world");
+}
+
+TEST(BPETokenDecoderTest, FromJson) {
+  nlohmann::json config = {{"type", "BPEDecoder"}, {"suffix", "</w>"}};
+  TokenDecoderConfig dec_config;
+  dec_config.parse_json(config);
+  auto decoder = dec_config.create();
+  auto result = decoder->decode({"He", "llo</w>", "world</w>"});
+  ASSERT_EQ(result.size(), 3);
+  EXPECT_EQ(result[0], "He");
+  EXPECT_EQ(result[1], "llo ");
+  EXPECT_EQ(result[2], "world");
+}
+
+// =============================================================================
+// CTCTokenDecoder
+// =============================================================================
+
+TEST(CTCTokenDecoderTest, Basic) {
+  CTCTokenDecoder decoder("<pad>", "|", true);
+  std::vector<std::string> tokens = {
+      "<pad>", "H", "H", "E", "<pad>", "L", "L", "O", "|", "W", "O", "R",
+      "L", "D"};
+  auto result = decoder.decode(tokens);
+  // After dedup + pad removal + | → space + cleanup
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_EQ(result[0], "HELO WORLD");
+}
+
+TEST(CTCTokenDecoderTest, NoCleanup) {
+  CTCTokenDecoder decoder("<pad>", "|", false);
+  std::vector<std::string> tokens = {"H", "E", "|", "L", "O"};
+  auto result = decoder.decode(tokens);
+  // Without cleanup, returns individual pieces
+  ASSERT_EQ(result.size(), 5);
+  EXPECT_EQ(result[0], "H");
+  EXPECT_EQ(result[1], "E");
+  EXPECT_EQ(result[2], " ");
+  EXPECT_EQ(result[3], "L");
+  EXPECT_EQ(result[4], "O");
+}
+
+TEST(CTCTokenDecoderTest, FromJson) {
+  nlohmann::json config = {
+      {"type", "CTC"},
+      {"pad_token", "<pad>"},
+      {"word_delimiter_token", "|"},
+      {"cleanup", true}};
+  TokenDecoderConfig dec_config;
+  dec_config.parse_json(config);
+  auto decoder = dec_config.create();
+  auto result = decoder->decode({"H", "E", "L", "L", "O"});
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_EQ(result[0], "HELO");
+}
+
+// =============================================================================
+// Adversarial / Edge Case Tests
+// =============================================================================
+
+TEST(DecoderAdversarialTest, MetaspaceEmptyTokens) {
+  MetaspaceTokenDecoder decoder;
+  auto result = decoder.decode({"", "", ""});
+  ASSERT_EQ(result.size(), 3);
+  // Empty tokens should stay empty (first one won't have leading space to strip)
+  EXPECT_EQ(result[0], "");
+}
+
+TEST(DecoderAdversarialTest, MetaspaceSingleToken) {
+  MetaspaceTokenDecoder decoder;
+  auto result = decoder.decode({"\xe2\x96\x81"});
+  ASSERT_EQ(result.size(), 1);
+  // Single ▁ → decoded to space → stripped on first token → empty
+  EXPECT_EQ(result[0], "");
+}
+
+TEST(DecoderAdversarialTest, BPEDecoderNoSuffixAnywhere) {
+  BPETokenDecoder decoder("</w>");
+  auto result = decoder.decode({"hel", "lo", "wor", "ld"});
+  ASSERT_EQ(result.size(), 4);
+  // No suffix found — tokens pass through unchanged
+  EXPECT_EQ(result[0], "hel");
+  EXPECT_EQ(result[1], "lo");
+  EXPECT_EQ(result[2], "wor");
+  EXPECT_EQ(result[3], "ld");
+}
+
+TEST(DecoderAdversarialTest, CTCAllPadTokens) {
+  CTCTokenDecoder decoder("<pad>", "|", true);
+  auto result = decoder.decode({"<pad>", "<pad>", "<pad>"});
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_EQ(result[0], "");
+}
+
+TEST(DecoderAdversarialTest, CTCAllDuplicates) {
+  CTCTokenDecoder decoder("<pad>", "|", true);
+  auto result = decoder.decode({"A", "A", "A", "A"});
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_EQ(result[0], "A");
+}
+
+TEST(DecoderAdversarialTest, WordPieceAllContinuations) {
+  WordPieceTokenDecoder decoder("##", true);
+  auto result = decoder.decode({"##a", "##b", "##c"});
+  // First token keeps ##, rest get prefix stripped
+  ASSERT_EQ(result.size(), 3);
+  EXPECT_EQ(result[0], "##a");
+  EXPECT_EQ(result[1], "b");
+  EXPECT_EQ(result[2], "c");
+}
+
+TEST(DecoderAdversarialTest, SequenceDecoderOrder) {
+  // Replace ▁ with space, THEN fuse — order matters
+  auto replace = std::make_shared<ReplaceTokenDecoder>(
+      "\xe2\x96\x81", " ");
+  auto fuse = std::make_shared<FuseTokenDecoder>();
+  SequenceTokenDecoder decoder({replace, fuse});
+
+  auto result = decoder.decode(
+      {"\xe2\x96\x81Hello", "\xe2\x96\x81world"});
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_EQ(result[0], " Hello world");
+}
+
+TEST(DecoderAdversarialTest, StripDecoderEmptyToken) {
+  StripTokenDecoder decoder(" ", 1, 1);
+  auto result = decoder.decode({""});
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_EQ(result[0], "");
+}
+
+TEST(DecoderAdversarialTest, ByteFallbackPartialHex) {
+  ByteFallbackTokenDecoder decoder;
+  // Partial hex patterns should pass through unchanged
+  auto result = decoder.decode({"<0x", "<0x4", "<0xZZ>"});
+  ASSERT_EQ(result.size(), 3);
+  EXPECT_EQ(result[0], "<0x");
+  EXPECT_EQ(result[1], "<0x4");
+  EXPECT_EQ(result[2], "<0xZZ>");
 }
 
 } // namespace tokenizers
