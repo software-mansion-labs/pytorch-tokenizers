@@ -40,6 +40,11 @@ class RegexPreTokenizerTest : public ::testing::Test {};
 // Test the basic construction
 TEST_F(RegexPreTokenizerTest, Construct) {
   RegexPreTokenizer ptok("[0-9]+");
+  // Verify the regex actually works after construction
+  auto result = ptok.pre_tokenize("abc123def456");
+  ASSERT_EQ(result.size(), 2);
+  EXPECT_EQ(result[0], "123");
+  EXPECT_EQ(result[1], "456");
 }
 
 // Test basic splitting using the expression for Tiktoken
@@ -516,19 +521,23 @@ TEST_F(PreTokenizerConfigTest, SplitWithMergedWithPreviousEndingDelimiter) {
   assert_split_match(*ptok, "hello-world-", {"hello-", "world-"});
 }
 
-TEST_F(PreTokenizerConfigTest, SplitWithUnsupportedBehavior) {
+TEST_F(PreTokenizerConfigTest, SplitWithMergedWithNext) {
   PreTokenizerConfig config;
-  EXPECT_THROW(
-      config
-          .parse_json(
-              json{
-                  {"type", "Split"},
-                  {"pattern", {{"String", "-"}}},
-                  {"behavior", "MergedWithNext"},
-                  {"invert", false},
-              })
-          .create(),
-      std::runtime_error);
+  auto pre_tokenizer = config
+                           .parse_json(
+                               json{
+                                   {"type", "Split"},
+                                   {"pattern", {{"String", "-"}}},
+                                   {"behavior", "MergedWithNext"},
+                                   {"invert", false},
+                               })
+                           .create();
+  auto result = pre_tokenizer->pre_tokenize("the-final--countdown");
+  ASSERT_EQ(result.size(), 4);
+  EXPECT_EQ(result[0], "the");
+  EXPECT_EQ(result[1], "-final");
+  EXPECT_EQ(result[2], "-");
+  EXPECT_EQ(result[3], "-countdown");
 }
 
 // Regex cache (unicode_regex_split) ///////////////////////////////////////////
@@ -650,17 +659,410 @@ TEST_F(RegexCacheTest, ByteLevelNoRegexSinglePieceEqualsByteEncoding) {
   }
 }
 
-TEST_F(PreTokenizerConfigTest, SplitWithInvertTrue) {
+TEST_F(PreTokenizerConfigTest, SplitWithInvertTrueString) {
+  // invert=true on a String pattern flips from delimiter mode to keep mode
+  // The string "-" is normally a delimiter; with invert, we keep the matches
   PreTokenizerConfig config;
-  EXPECT_THROW(
-      config
-          .parse_json(
-              json{
-                  {"type", "Split"},
-                  {"pattern", {{"String", "-"}}},
-                  {"behavior", "MergedWithPrevious"},
-                  {"invert", true},
-              })
-          .create(),
-      std::runtime_error);
+  auto pre_tokenizer = config
+                           .parse_json(
+                               json{
+                                   {"type", "Split"},
+                                   {"pattern", {{"String", "-"}}},
+                                   {"behavior", "Removed"},
+                                   {"invert", true},
+                               })
+                           .create();
+  auto result = pre_tokenizer->pre_tokenize("the-final--countdown");
+  // With invert=true on string, the "-" matches are kept as tokens
+  ASSERT_EQ(result.size(), 3);
+  EXPECT_EQ(result[0], "-");
+  EXPECT_EQ(result[1], "-");
+  EXPECT_EQ(result[2], "-");
+}
+
+// =============================================================================
+// Metaspace
+// =============================================================================
+
+TEST(MetaspacePreTokenizerTest, Basic) {
+  MetaspacePreTokenizer pt;
+  auto result = pt.pre_tokenize("Hello world");
+  ASSERT_EQ(result.size(), 2);
+  EXPECT_EQ(result[0], "\xe2\x96\x81Hello");  // ▁Hello
+  EXPECT_EQ(result[1], "\xe2\x96\x81world");  // ▁world
+}
+
+TEST(MetaspacePreTokenizerTest, AlreadyHasReplacement) {
+  MetaspacePreTokenizer pt;
+  auto result = pt.pre_tokenize("\xe2\x96\x81Hello");
+  // Already starts with ▁, should not double-prepend
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_EQ(result[0], "\xe2\x96\x81Hello");
+}
+
+TEST(MetaspacePreTokenizerTest, NeverPrepend) {
+  MetaspacePreTokenizer pt(
+      "\xe2\x96\x81", MetaspacePreTokenizer::PrependScheme::Never, true);
+  auto result = pt.pre_tokenize("Hello world");
+  ASSERT_EQ(result.size(), 2);
+  EXPECT_EQ(result[0], "Hello");
+  EXPECT_EQ(result[1], "\xe2\x96\x81world");
+}
+
+TEST(MetaspacePreTokenizerTest, NoSplit) {
+  MetaspacePreTokenizer pt(
+      "\xe2\x96\x81", MetaspacePreTokenizer::PrependScheme::Always, false);
+  auto result = pt.pre_tokenize("Hello world");
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_EQ(result[0], "\xe2\x96\x81Hello\xe2\x96\x81world");
+}
+
+TEST(MetaspacePreTokenizerTest, Empty) {
+  MetaspacePreTokenizer pt;
+  auto result = pt.pre_tokenize("");
+  EXPECT_TRUE(result.empty());
+}
+
+TEST(MetaspacePreTokenizerTest, FromJson) {
+  PreTokenizerConfig config;
+  config.parse_json(json{
+      {"type", "Metaspace"},
+      {"replacement", "\xe2\x96\x81"},
+      {"prepend_scheme", "always"},
+      {"split", true}});
+  auto pt = config.create();
+  auto result = pt->pre_tokenize("Hello world");
+  ASSERT_EQ(result.size(), 2);
+  EXPECT_EQ(result[0], "\xe2\x96\x81Hello");
+  EXPECT_EQ(result[1], "\xe2\x96\x81world");
+}
+
+TEST(MetaspacePreTokenizerTest, LegacyAddPrefixSpace) {
+  PreTokenizerConfig config;
+  config.parse_json(json{
+      {"type", "Metaspace"},
+      {"replacement", "\xe2\x96\x81"},
+      {"add_prefix_space", false}});
+  auto pt = config.create();
+  auto result = pt->pre_tokenize("Hello world");
+  // add_prefix_space=false maps to prepend_scheme="never"
+  EXPECT_EQ(result[0], "Hello");
+}
+
+// =============================================================================
+// Whitespace
+// =============================================================================
+
+TEST(WhitespacePreTokenizerTest, Basic) {
+  WhitespacePreTokenizer pt;
+  auto result = pt.pre_tokenize("Hey man!");
+  ASSERT_EQ(result.size(), 3);
+  EXPECT_EQ(result[0], "Hey");
+  EXPECT_EQ(result[1], "man");
+  EXPECT_EQ(result[2], "!");
+}
+
+TEST(WhitespacePreTokenizerTest, MultipleSpaces) {
+  WhitespacePreTokenizer pt;
+  auto result = pt.pre_tokenize("Hello   world");
+  ASSERT_EQ(result.size(), 2);
+  EXPECT_EQ(result[0], "Hello");
+  EXPECT_EQ(result[1], "world");
+}
+
+TEST(WhitespacePreTokenizerTest, FromJson) {
+  PreTokenizerConfig config;
+  config.parse_json(json{{"type", "Whitespace"}});
+  auto pt = config.create();
+  auto result = pt->pre_tokenize("test 123");
+  EXPECT_GE(result.size(), 2);
+}
+
+// =============================================================================
+// WhitespaceSplit
+// =============================================================================
+
+TEST(WhitespaceSplitTest, Basic) {
+  WhitespaceSplitPreTokenizer pt;
+  auto result = pt.pre_tokenize("Hey, man, Good?");
+  ASSERT_EQ(result.size(), 3);
+  EXPECT_EQ(result[0], "Hey,");
+  EXPECT_EQ(result[1], "man,");
+  EXPECT_EQ(result[2], "Good?");
+}
+
+TEST(WhitespaceSplitTest, TabsAndNewlines) {
+  WhitespaceSplitPreTokenizer pt;
+  auto result = pt.pre_tokenize("a\tb\nc");
+  ASSERT_EQ(result.size(), 3);
+  EXPECT_EQ(result[0], "a");
+  EXPECT_EQ(result[1], "b");
+  EXPECT_EQ(result[2], "c");
+}
+
+TEST(WhitespaceSplitTest, Empty) {
+  WhitespaceSplitPreTokenizer pt;
+  auto result = pt.pre_tokenize("");
+  EXPECT_TRUE(result.empty());
+}
+
+TEST(WhitespaceSplitTest, FromJson) {
+  PreTokenizerConfig config;
+  config.parse_json(json{{"type", "WhitespaceSplit"}});
+  auto pt = config.create();
+  auto result = pt->pre_tokenize("a b c");
+  ASSERT_EQ(result.size(), 3);
+}
+
+// =============================================================================
+// Punctuation
+// =============================================================================
+
+TEST(PunctuationPreTokenizerTest, Isolated) {
+  PunctuationPreTokenizer pt("Isolated");
+  auto result = pt.pre_tokenize("Hello!");
+  ASSERT_EQ(result.size(), 2);
+  EXPECT_EQ(result[0], "Hello");
+  EXPECT_EQ(result[1], "!");
+}
+
+TEST(PunctuationPreTokenizerTest, MultiplePunc) {
+  PunctuationPreTokenizer pt("Isolated");
+  auto result = pt.pre_tokenize("Wait?!");
+  ASSERT_EQ(result.size(), 3);
+  EXPECT_EQ(result[0], "Wait");
+  EXPECT_EQ(result[1], "?");
+  EXPECT_EQ(result[2], "!");
+}
+
+TEST(PunctuationPreTokenizerTest, Contiguous) {
+  PunctuationPreTokenizer pt("Contiguous");
+  auto result = pt.pre_tokenize("Wait?!");
+  ASSERT_EQ(result.size(), 2);
+  EXPECT_EQ(result[0], "Wait");
+  EXPECT_EQ(result[1], "?!");
+}
+
+TEST(PunctuationPreTokenizerTest, NoPunc) {
+  PunctuationPreTokenizer pt("Isolated");
+  auto result = pt.pre_tokenize("Hello");
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_EQ(result[0], "Hello");
+}
+
+TEST(PunctuationPreTokenizerTest, FromJson) {
+  PreTokenizerConfig config;
+  config.parse_json(json{{"type", "Punctuation"}, {"behavior", "Isolated"}});
+  auto pt = config.create();
+  auto result = pt->pre_tokenize("Hi!");
+  ASSERT_EQ(result.size(), 2);
+}
+
+// =============================================================================
+// CharDelimiterSplit
+// =============================================================================
+
+TEST(CharDelimiterSplitTest, Basic) {
+  CharDelimiterSplitPreTokenizer pt(",");
+  auto result = pt.pre_tokenize("a,b,c");
+  ASSERT_EQ(result.size(), 3);
+  EXPECT_EQ(result[0], "a");
+  EXPECT_EQ(result[1], "b");
+  EXPECT_EQ(result[2], "c");
+}
+
+TEST(CharDelimiterSplitTest, NoDelimiter) {
+  CharDelimiterSplitPreTokenizer pt(",");
+  auto result = pt.pre_tokenize("hello");
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_EQ(result[0], "hello");
+}
+
+TEST(CharDelimiterSplitTest, ConsecutiveDelimiters) {
+  CharDelimiterSplitPreTokenizer pt(",");
+  auto result = pt.pre_tokenize("a,,b");
+  // Empty parts between consecutive delimiters are dropped
+  ASSERT_EQ(result.size(), 2);
+  EXPECT_EQ(result[0], "a");
+  EXPECT_EQ(result[1], "b");
+}
+
+TEST(CharDelimiterSplitTest, FromJson) {
+  PreTokenizerConfig config;
+  config.parse_json(json{{"type", "CharDelimiterSplit"}, {"delimiter", "-"}});
+  auto pt = config.create();
+  auto result = pt->pre_tokenize("a-b-c");
+  ASSERT_EQ(result.size(), 3);
+}
+
+// =============================================================================
+// UnicodeScripts
+// =============================================================================
+
+TEST(UnicodeScriptsTest, LatinOnly) {
+  UnicodeScriptsPreTokenizer pt;
+  auto result = pt.pre_tokenize("Hello world");
+  // All Latin + space (Any) — no script boundary
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_EQ(result[0], "Hello world");
+}
+
+TEST(UnicodeScriptsTest, LatinAndCJK) {
+  UnicodeScriptsPreTokenizer pt;
+  auto result = pt.pre_tokenize("Hello\xe4\xb8\x96\xe7\x95\x8c"); // Hello世界
+  ASSERT_EQ(result.size(), 2);
+  EXPECT_EQ(result[0], "Hello");
+  EXPECT_EQ(result[1], "\xe4\xb8\x96\xe7\x95\x8c");
+}
+
+TEST(UnicodeScriptsTest, LatinAndCyrillic) {
+  UnicodeScriptsPreTokenizer pt;
+  // "Hello" (Latin) + "Мир" (Cyrillic)
+  auto result = pt.pre_tokenize("Hello\xd0\x9c\xd0\xb8\xd1\x80");
+  ASSERT_EQ(result.size(), 2);
+  EXPECT_EQ(result[0], "Hello");
+  EXPECT_EQ(result[1], "\xd0\x9c\xd0\xb8\xd1\x80");
+}
+
+TEST(UnicodeScriptsTest, Empty) {
+  UnicodeScriptsPreTokenizer pt;
+  auto result = pt.pre_tokenize("");
+  EXPECT_TRUE(result.empty());
+}
+
+TEST(UnicodeScriptsTest, FromJson) {
+  PreTokenizerConfig config;
+  config.parse_json(json{{"type", "UnicodeScripts"}});
+  auto pt = config.create();
+  auto result = pt->pre_tokenize("test");
+  ASSERT_EQ(result.size(), 1);
+}
+
+// =============================================================================
+// FixedLength
+// =============================================================================
+
+TEST(FixedLengthTest, Basic) {
+  FixedLengthPreTokenizer pt(5);
+  auto result = pt.pre_tokenize("Hello world");
+  ASSERT_EQ(result.size(), 3);
+  EXPECT_EQ(result[0], "Hello");
+  EXPECT_EQ(result[1], " worl");
+  EXPECT_EQ(result[2], "d");
+}
+
+TEST(FixedLengthTest, ExactMultiple) {
+  FixedLengthPreTokenizer pt(3);
+  auto result = pt.pre_tokenize("abcdef");
+  ASSERT_EQ(result.size(), 2);
+  EXPECT_EQ(result[0], "abc");
+  EXPECT_EQ(result[1], "def");
+}
+
+TEST(FixedLengthTest, UTF8Chars) {
+  FixedLengthPreTokenizer pt(2);
+  // "aé" is 3 bytes but 2 characters
+  auto result = pt.pre_tokenize("a\xc3\xa9" "bc");
+  ASSERT_EQ(result.size(), 2);
+  EXPECT_EQ(result[0], "a\xc3\xa9"); // "aé" = 2 chars
+  EXPECT_EQ(result[1], "bc");
+}
+
+TEST(FixedLengthTest, Empty) {
+  FixedLengthPreTokenizer pt(5);
+  auto result = pt.pre_tokenize("");
+  EXPECT_TRUE(result.empty());
+}
+
+TEST(FixedLengthTest, FromJson) {
+  PreTokenizerConfig config;
+  config.parse_json(json{{"type", "FixedLength"}, {"length", 3}});
+  auto pt = config.create();
+  auto result = pt->pre_tokenize("abcde");
+  ASSERT_EQ(result.size(), 2);
+  EXPECT_EQ(result[0], "abc");
+  EXPECT_EQ(result[1], "de");
+}
+
+// =============================================================================
+// Adversarial / Edge Case Tests
+// =============================================================================
+
+TEST(PreTokenizerAdversarialTest, MalformedUTF8_Whitespace) {
+  // NOTE: WhitespaceSplitPreTokenizer uses unicode_cpts_from_utf8 which may
+  // not handle malformed UTF-8 gracefully. This test documents the limitation.
+  // For now, we only test valid UTF-8 edge cases.
+  WhitespaceSplitPreTokenizer pt;
+  // Valid but unusual: zero-width space (U+200B) between words
+  auto result = pt.pre_tokenize("hello\xe2\x80\x8bworld");
+  EXPECT_GE(result.size(), 1);
+}
+
+TEST(PreTokenizerAdversarialTest, OnlyWhitespace) {
+  WhitespaceSplitPreTokenizer pt;
+  auto result = pt.pre_tokenize("   \t\n  ");
+  EXPECT_TRUE(result.empty());
+}
+
+TEST(PreTokenizerAdversarialTest, MetaspaceConsecutiveSpaces) {
+  MetaspacePreTokenizer pt;
+  auto result = pt.pre_tokenize("a  b");
+  // "a  b" → "a▁▁b" → prepend → "▁a▁▁b" → split on ▁
+  // Should produce ["▁a", "▁", "▁b"]
+  ASSERT_EQ(result.size(), 3);
+  EXPECT_EQ(result[0], "\xe2\x96\x81" "a");
+  EXPECT_EQ(result[1], "\xe2\x96\x81");
+  EXPECT_EQ(result[2], "\xe2\x96\x81" "b");
+}
+
+TEST(PreTokenizerAdversarialTest, MetaspaceSingleSpace) {
+  MetaspacePreTokenizer pt;
+  auto result = pt.pre_tokenize(" ");
+  // " " → "▁" → already starts with ▁ → no double prepend → ["▁"]
+  ASSERT_EQ(result.size(), 1);
+  EXPECT_EQ(result[0], "\xe2\x96\x81");
+}
+
+TEST(PreTokenizerAdversarialTest, PunctuationOnlyInput) {
+  PunctuationPreTokenizer pt("Isolated");
+  auto result = pt.pre_tokenize("!@#$");
+  // Each punctuation char should be isolated
+  ASSERT_EQ(result.size(), 4);
+  EXPECT_EQ(result[0], "!");
+  EXPECT_EQ(result[1], "@");
+  EXPECT_EQ(result[2], "#");
+  EXPECT_EQ(result[3], "$");
+}
+
+TEST(PreTokenizerAdversarialTest, FixedLengthSingleChar) {
+  FixedLengthPreTokenizer pt(1);
+  auto result = pt.pre_tokenize("abc");
+  ASSERT_EQ(result.size(), 3);
+  EXPECT_EQ(result[0], "a");
+  EXPECT_EQ(result[1], "b");
+  EXPECT_EQ(result[2], "c");
+}
+
+TEST(PreTokenizerAdversarialTest, UnicodeScriptsWithEmoji) {
+  UnicodeScriptsPreTokenizer pt;
+  // Emoji between Latin text — emoji is Script::Any, shouldn't trigger boundary
+  auto result = pt.pre_tokenize("Hello\xf0\x9f\x98\x80World"); // Hello😀World
+  // Depends on whether emoji is classified as Any or Other
+  // At minimum it shouldn't crash and should return the full text
+  EXPECT_GE(result.size(), 1);
+  // Rejoin should equal original
+  std::string joined;
+  for (const auto& r : result) joined += r;
+  EXPECT_EQ(joined, "Hello\xf0\x9f\x98\x80World");
+}
+
+TEST(PreTokenizerAdversarialTest, VeryLongInput) {
+  WhitespacePreTokenizer pt;
+  // 100k character input
+  std::string long_input;
+  for (int i = 0; i < 10000; ++i) {
+    long_input += "word" + std::to_string(i) + " ";
+  }
+  auto result = pt.pre_tokenize(long_input);
+  EXPECT_EQ(result.size(), 10000);
 }

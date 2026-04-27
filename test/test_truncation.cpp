@@ -125,13 +125,22 @@ TEST(TruncationTest, TestLongestFirstPair) {
 }
 
 TEST(TruncationTest, TestStride) {
+  // Stride is stored in config but overflow sequences are not returned
+  // by truncate(). Verify stride doesn't break normal truncation.
   nlohmann::json j = R"({
         "max_length": 5,
         "stride": 2
     })"_json;
-  // If your API returns a "TruncatedPath" or similar structure
-  // containing the overflow, verify the stride overlap here.
-  // Currently we only return the primary truncated vector.
+  TruncationConfig config;
+  config.parse_json(j);
+  auto truncation = config.create();
+  ASSERT_NE(truncation, nullptr);
+
+  std::vector<uint64_t> tokens = {1, 2, 3, 4, 5, 6, 7, 8};
+  auto result = truncation->truncate(tokens, 0);
+  ASSERT_EQ(result.size(), 5);
+  EXPECT_EQ(result[0], 1);
+  EXPECT_EQ(result[4], 5);
 }
 
 TEST(TruncationTest, TestOnlyFirstStrategy) {

@@ -291,10 +291,11 @@ TEST_F(TekkenTest, TestVersion) {
   Error res = tekken->load(modelPath_);
   EXPECT_EQ(res, Error::Ok);
 
-  // Check that version is loaded
   std::string version = tekken->get_version();
   EXPECT_FALSE(version.empty());
-  std::cout << "Tekken version: " << version << std::endl;
+  // Tekken versions follow "vN" format (e.g. "v7", "v3")
+  EXPECT_EQ(version[0], 'v');
+  EXPECT_TRUE(std::isdigit(version[1]));
 }
 
 // Additional comprehensive tests inspired by mistral-common test harness
