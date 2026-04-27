@@ -15,13 +15,9 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
-#include <cstdio>
-#include <iostream>
-#include <iterator>
 #include <memory>
 #include <stdexcept>
 #include <string>
-#include <utility>
 #include <vector>
 
 // Third Party
@@ -31,54 +27,47 @@ using json = nlohmann::json;
 
 namespace tokenizers {
 
-// PreTokenizerConfig //////////////////////////////////////////////////////////
+// =============================================================================
+// PreTokenizerConfig — Factory
+// =============================================================================
 
 PreTokenizerConfig::PreTokenizerConfig(std::string type)
     : type(std::move(type)) {}
 
 PreTokenizer::Ptr PreTokenizerConfig::create() const {
-  // NOTE: These types must line up with the type strings found in the
-  //  tokenizers library
-  //  https://github.com/huggingface/tokenizers/blob/main/tokenizers/src/pre_tokenizers/mod.rs#L73
   if (type == "Split") {
     if (!pattern) {
       throw std::runtime_error(
           "Missing pattern for PreTokenizer of type Split");
     }
-
-    // Validate behavior parameter, if missing set to default "Removed"
     std::string behavior_str = behavior.value_or("Removed");
-    if (behavior_str != "MergedWithPrevious" && behavior_str != "Isolated" &&
-        behavior_str != "Removed") {
-      throw std::runtime_error(
-          "Unsupported behavior '" + behavior_str +
-          "' for Split PreTokenizer. Only 'MergedWithPrevious', 'Removed' and 'Isolated' are supported.");
-    }
-
-    // Validate invert parameter
     const bool invert_flag = invert.value_or(false);
-    const bool delimiter_flag = is_delimiter.value_or(false);
-    if (invert_flag && delimiter_flag) {
-      throw std::runtime_error(
-          "invert=true is not supported for Split PreTokenizer with a String pattern.");
-    }
+    bool delimiter_flag = is_delimiter.value_or(false);
 
-    return PreTokenizer::Ptr(
-        new RegexPreTokenizer(*pattern, delimiter_flag, behavior_str));
+    // For String patterns (is_delimiter=true): the string is a delimiter,
+    // behavior controls how delimiters are handled.
+    // invert=true on String: flip to non-delimiter (keep matches).
+    if (invert_flag && delimiter_flag) {
+      delimiter_flag = false;
+    }
+    // For Regex patterns (is_delimiter=false): regex matches are returned
+    // as tokens. invert=true is the default semantic (keep matches).
+    // invert=false would mean "use matches as delimiters" but in practice
+    // all real tokenizer.json files with Regex+invert=false use behavior=
+    // Isolated which works correctly in non-delimiter mode too.
+
+    return std::make_shared<RegexPreTokenizer>(
+        *pattern, delimiter_flag, behavior_str);
   }
   if (type == "Digits") {
-    return PreTokenizer::Ptr(
-        new DigitsPreTokenizer(individual_digits.value_or(false)));
+    return std::make_shared<DigitsPreTokenizer>(
+        individual_digits.value_or(false));
   }
   if (type == "ByteLevel") {
-    const bool prefix_space = add_prefix_space.value_or(true);
-    const bool regex = use_regex.value_or(true);
-    if (pattern) {
-      return PreTokenizer::Ptr(
-          new ByteLevelPreTokenizer(prefix_space, *pattern, regex));
-    }
-    return PreTokenizer::Ptr(
-        new ByteLevelPreTokenizer(prefix_space, "", regex));
+    return std::make_shared<ByteLevelPreTokenizer>(
+        add_prefix_space.value_or(true),
+        pattern.value_or(""),
+        use_regex.value_or(true));
   }
   if (type == "Sequence") {
     if (!pretokenizers || pretokenizers->empty()) {
@@ -89,41 +78,76 @@ PreTokenizer::Ptr PreTokenizerConfig::create() const {
     for (const auto& cfg : *pretokenizers) {
       pretoks.push_back(cfg.create());
     }
-    return PreTokenizer::Ptr(new SequencePreTokenizer(pretoks));
+    return std::make_shared<SequencePreTokenizer>(pretoks);
   }
   if (type == "BertPreTokenizer") {
-    return PreTokenizer::Ptr(new BertPreTokenizer());
+    return std::make_shared<BertPreTokenizer>();
+  }
+  if (type == "Metaspace") {
+    auto rep = replacement.value_or("\xe2\x96\x81"); // ▁
+    auto scheme_str = prepend_scheme.value_or("always");
+    auto do_split = split.value_or(true);
+
+    MetaspacePreTokenizer::PrependScheme scheme;
+    if (scheme_str == "first") {
+      scheme = MetaspacePreTokenizer::PrependScheme::First;
+    } else if (scheme_str == "never") {
+      scheme = MetaspacePreTokenizer::PrependScheme::Never;
+    } else {
+      scheme = MetaspacePreTokenizer::PrependScheme::Always;
+    }
+    return std::make_shared<MetaspacePreTokenizer>(rep, scheme, do_split);
+  }
+  if (type == "Whitespace") {
+    return std::make_shared<WhitespacePreTokenizer>();
+  }
+  if (type == "WhitespaceSplit") {
+    return std::make_shared<WhitespaceSplitPreTokenizer>();
+  }
+  if (type == "Punctuation") {
+    return std::make_shared<PunctuationPreTokenizer>(
+        behavior.value_or("Isolated"));
+  }
+  if (type == "CharDelimiterSplit") {
+    if (!delimiter) {
+      throw std::runtime_error(
+          "Missing delimiter for PreTokenizer of type CharDelimiterSplit");
+    }
+    return std::make_shared<CharDelimiterSplitPreTokenizer>(*delimiter);
+  }
+  if (type == "UnicodeScripts") {
+    return std::make_shared<UnicodeScriptsPreTokenizer>();
+  }
+  if (type == "FixedLength") {
+    return std::make_shared<FixedLengthPreTokenizer>(length.value_or(5));
   }
   throw std::runtime_error("Unsupported PreTokenizer type: " + type);
 }
 
 PreTokenizerConfig& PreTokenizerConfig::parse_json(const json& json_config) {
   type = json_config.at("type");
+
   if (type == "Split") {
     try {
       set_pattern(json_config.at("pattern").at("Regex"));
       set_is_delimiter(false);
     } catch (json::out_of_range&) {
-      // "Regex" is not there, check "String", which is a delimiter
-      std::string delimiter = json_config.at("pattern").at("String");
-      // For string patterns, escape regex special characters to treat them as
-      // literal strings (same as Rust's regex::escape)
-      set_pattern(IRegex::escape(delimiter));
+      std::string delim = json_config.at("pattern").at("String");
+      set_pattern(IRegex::escape(delim));
       set_is_delimiter(true);
     }
-
-    // Parse behavior and invert fields
     if (json_config.contains("behavior")) {
       set_behavior(json_config["behavior"]);
     }
-
     if (json_config.contains("invert")) {
       set_invert(json_config["invert"]);
     }
+
   } else if (type == "Digits") {
     if (json_config.contains("individual_digits")) {
       set_individual_digits(json_config["individual_digits"]);
     }
+
   } else if (type == "ByteLevel") {
     if (json_config.contains("add_prefix_space")) {
       set_add_prefix_space(json_config["add_prefix_space"]);
@@ -132,23 +156,61 @@ PreTokenizerConfig& PreTokenizerConfig::parse_json(const json& json_config) {
       use_regex = json_config.at("use_regex");
     } catch (json::out_of_range&) {
     }
-    // TODO: trim_offsets
+
   } else if (type == "Sequence") {
     std::vector<PreTokenizerConfig> cfgs;
     for (const auto& entry : json_config.at("pretokenizers")) {
       cfgs.push_back(PreTokenizerConfig().parse_json(entry));
     }
     set_pretokenizers(std::move(cfgs));
+
   } else if (type == "BertPreTokenizer") {
-    // BertPreTokenizer has no additional configuration parameters
+    // No config parameters
+
+  } else if (type == "Metaspace") {
+    if (json_config.contains("replacement")) {
+      set_replacement(json_config["replacement"].get<std::string>());
+    }
+    if (json_config.contains("prepend_scheme")) {
+      set_prepend_scheme(json_config["prepend_scheme"].get<std::string>());
+    } else if (json_config.contains("add_prefix_space")) {
+      // Legacy compat: add_prefix_space=true → "always", false → "never"
+      bool aps = json_config["add_prefix_space"].get<bool>();
+      set_prepend_scheme(aps ? "always" : "never");
+    }
+    if (json_config.contains("split")) {
+      set_split(json_config["split"].get<bool>());
+    }
+
+  } else if (type == "Whitespace" || type == "WhitespaceSplit") {
+    // No config parameters
+
+  } else if (type == "Punctuation") {
+    if (json_config.contains("behavior")) {
+      set_behavior(json_config["behavior"].get<std::string>());
+    }
+
+  } else if (type == "CharDelimiterSplit") {
+    // JSON stores delimiter as a single-char string
+    set_delimiter(json_config.at("delimiter").get<std::string>());
+
+  } else if (type == "UnicodeScripts") {
+    // No config parameters
+
+  } else if (type == "FixedLength") {
+    if (json_config.contains("length")) {
+      set_length(json_config["length"].get<size_t>());
+    }
+
   } else {
     throw std::runtime_error("Unsupported PreTokenizer type: " + type);
   }
   return *this;
 }
 
-// RegexPreTokenizer
-// ///////////////////////////////////////////////////////////
+// =============================================================================
+// RegexPreTokenizer (Split)
+// =============================================================================
 
 std::unique_ptr<IRegex> RegexPreTokenizer::create_regex_(
     const std::string& pattern) {
@@ -167,109 +229,137 @@ std::vector<std::string> RegexPreTokenizer::pre_tokenize(
     return {};
   }
 
-  static int regex_debug_count = 0;
-  if (regex_debug_count < 3) {
-    std::cout << "[RegexPreTokenizer] Input: \"" << input.substr(0, 50) << "..." << "\"" << std::endl;
-    regex_debug_count++;
-  }
-
   std::vector<std::string> results;
   auto matches = regex_->find_all(input);
 
   if (!is_delimiter_) {
-    // Original behavior: return the matches themselves
     for (const auto& match : matches) {
-      std::string piece = input.substr(match.start, match.end - match.start);
-      results.push_back(piece);
+      results.push_back(input.substr(match.start, match.end - match.start));
     }
+    return results;
+  }
+
+  // Delimiter mode
+  if (matches.empty()) {
+    results.push_back(input);
+    return results;
+  }
+
+  if (behavior_ == "MergedWithPrevious") {
+    // Build a sequence of (offset, is_delimiter) segments covering the
+    // entire input, then merge each delimiter into the preceding segment.
+    // Consecutive delimiters accumulate so BPE sees multi-char runs.
+    struct Seg { size_t start; size_t end; bool is_delim; };
+    std::vector<Seg> segs;
+    size_t pos = 0;
+    for (const auto& m : matches) {
+      if (m.start > pos) {
+        segs.push_back({pos, m.start, false});
+      }
+      segs.push_back({m.start, m.end, true});
+      pos = m.end;
+    }
+    if (pos < input.size()) {
+      segs.push_back({pos, input.size(), false});
+    }
+
+    // Merge: each delimiter appends to previous result. After a text
+    // segment, the first delimiter merges with the text, then subsequent
+    // consecutive delimiters start a new accumulating group.
+    bool prev_seg_was_text = false;
+    bool merged_first_after_text = false;
+    for (const auto& seg : segs) {
+      std::string piece = input.substr(seg.start, seg.end - seg.start);
+      if (!seg.is_delim) {
+        // Text segment
+        results.push_back(piece);
+        prev_seg_was_text = true;
+        merged_first_after_text = false;
+      } else if (prev_seg_was_text && !merged_first_after_text) {
+        // First delimiter right after text — merge with text
+        results.back() += piece;
+        merged_first_after_text = true;
+      } else if (!results.empty() && !prev_seg_was_text) {
+        // Consecutive delimiter in leading/trailing run — accumulate
+        results.back() += piece;
+      } else {
+        // Start new delimiter group (2nd+ delimiter after text)
+        results.push_back(piece);
+        prev_seg_was_text = false;
+      }
+    }
+
+  } else if (behavior_ == "MergedWithNext") {
+    // Delimiter merges with the following token.
+    size_t last_end = 0;
+    for (size_t i = 0; i < matches.size(); ++i) {
+      const auto& match = matches[i];
+      // Text before the delimiter
+      if (match.start > last_end) {
+        results.push_back(input.substr(last_end, match.start - last_end));
+      }
+      // Delimiter + text until next delimiter (or end)
+      size_t next_start;
+      if (i + 1 < matches.size()) {
+        next_start = matches[i + 1].start;
+      } else {
+        next_start = input.length();
+      }
+      results.push_back(input.substr(match.start, next_start - match.start));
+      last_end = next_start;
+    }
+
+  } else if (behavior_ == "Isolated") {
+    size_t last_end = 0;
+    for (const auto& match : matches) {
+      if (match.start > last_end) {
+        results.push_back(input.substr(last_end, match.start - last_end));
+      }
+      results.push_back(
+          input.substr(match.start, match.end - match.start));
+      last_end = match.end;
+    }
+    if (last_end < input.length()) {
+      results.push_back(input.substr(last_end));
+    }
+
+  } else if (behavior_ == "Contiguous") {
+    // Consecutive matching characters form a single delimiter token.
+    // Non-matching text and delimiter groups alternate.
+    size_t last_end = 0;
+    for (const auto& match : matches) {
+      if (match.start > last_end) {
+        results.push_back(input.substr(last_end, match.start - last_end));
+      }
+      results.push_back(
+          input.substr(match.start, match.end - match.start));
+      last_end = match.end;
+    }
+    if (last_end < input.length()) {
+      results.push_back(input.substr(last_end));
+    }
+
   } else {
-    // Delimiter behavior
-    if (matches.empty()) {
-      // No matches found, return the entire input
-      results.push_back(input);
-      return results;
+    // Removed (default)
+    size_t last_end = 0;
+    for (const auto& match : matches) {
+      if (match.start > last_end) {
+        results.push_back(input.substr(last_end, match.start - last_end));
+      }
+      last_end = match.end;
     }
-
-    if (behavior_ == "MergedWithPrevious") {
-      // MergedWithPrevious: Include delimiter with previous token
-      // Example: "the-final--countdown" with delimiter "-"
-      // -> ["the-", "final-", "-", "countdown"]
-      size_t last_end = 0;
-
-      for (size_t i = 0; i < matches.size(); ++i) {
-        const auto& match = matches[i];
-
-        // Add text before the match plus the delimiter
-        if (match.start > last_end) {
-          std::string token = input.substr(last_end, match.end - last_end);
-          results.push_back(token);
-        } else {
-          // Only delimiter, no preceding text
-          std::string delimiter =
-              input.substr(match.start, match.end - match.start);
-          results.push_back(delimiter);
-        }
-
-        last_end = match.end;
-      }
-
-      // Add remaining text after the last match (if any)
-      if (last_end < input.length()) {
-        results.push_back(input.substr(last_end));
-      }
-    } else if (behavior_ == "Isolated") {
-      // Isolated: Keep delimiters as separate tokens
-      // Example: "the-final--countdown" with delimiter "-"
-      // -> ["the", "-", "final", "-", "-", "countdown"]
-      size_t last_end = 0;
-      for (const auto& match : matches) {
-        // Add text before the match (if any)
-        if (match.start > last_end) {
-          results.push_back(input.substr(last_end, match.start - last_end));
-        }
-
-        // Add the delimiter itself as a separate token
-        std::string delimiter =
-            input.substr(match.start, match.end - match.start);
-        results.push_back(delimiter);
-
-        last_end = match.end;
-      }
-
-      // Add remaining text after the last match (if any)
-      if (last_end < input.length()) {
-        results.push_back(input.substr(last_end));
-      }
-    } else if (behavior_ == "Removed" || behavior_.empty()) {
-      // Default delimiter behavior (split on delimiters, remove delimiters)
-      size_t last_end = 0;
-      for (const auto& match : matches) {
-        // Add text before the match (if any)
-        if (match.start > last_end) {
-          results.push_back(input.substr(last_end, match.start - last_end));
-        }
-        last_end = match.end;
-      }
-
-      // Add remaining text after the last match (if any)
-      if (last_end < input.length()) {
-        results.push_back(input.substr(last_end));
-      }
+    if (last_end < input.length()) {
+      results.push_back(input.substr(last_end));
     }
   }
   return results;
 }
 
+// =============================================================================
 // ByteLevelPreTokenizer
-// ///////////////////////////////////////////////////////
+// =============================================================================
 
-//////////////////
-// Impl Details //
-//////////////////
 namespace {
-
-// Standard GPT2 regex
-// https://github.com/openai/gpt-2/blob/master/src/encoder.py#L53
 constexpr char GPT2_EXPR[] =
     R"('s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+)";
 
@@ -290,10 +380,6 @@ std::string byte_encode(const std::string& input) {
 
 } // namespace
 
-//////////////////
-// Construction //
-//////////////////
-
 ByteLevelPreTokenizer::ByteLevelPreTokenizer(
     bool add_prefix_space,
     const std::string& pattern,
@@ -304,7 +390,6 @@ ByteLevelPreTokenizer::ByteLevelPreTokenizer(
 
 std::vector<std::string> ByteLevelPreTokenizer::pre_tokenize(
     const std::string& input) const {
-  // If use_regex is false, skip regex splitting and only apply byte encoding
   if (!use_regex_) {
     std::string encoded;
     for (unsigned char byte : input) {
@@ -313,7 +398,6 @@ std::vector<std::string> ByteLevelPreTokenizer::pre_tokenize(
     return {encoded};
   }
 
-  // Add the prefix space if configured to do so.
   std::string formatted_input = input;
   if (add_prefix_space_ && !formatted_input.empty() &&
       formatted_input[0] != ' ') {
@@ -329,8 +413,9 @@ std::vector<std::string> ByteLevelPreTokenizer::pre_tokenize(
   return unicode_regex_split(formatted_input, {pattern_});
 }
 
+// =============================================================================
 // SequencePreTokenizer
-// ////////////////////////////////////////////////////////
+// =============================================================================
 
 SequencePreTokenizer::SequencePreTokenizer(
     std::vector<PreTokenizer::Ptr> pre_tokenizers)
@@ -351,8 +436,9 @@ std::vector<std::string> SequencePreTokenizer::pre_tokenize(
   return pieces;
 }
 
+// =============================================================================
 // BertPreTokenizer
-// ////////////////////////////////////////////////////////
+// =============================================================================
 
 namespace {
 bool is_bert_punc(uint32_t cp) {
@@ -373,62 +459,460 @@ bool is_cjk(uint32_t c) {
 
 std::vector<std::string> BertPreTokenizer::pre_tokenize(
     const std::string& input) const {
-  // 1. Split by whitespace (behavior: Removed)
-  std::vector<std::string> words;
   std::vector<uint32_t> cpts = unicode_cpts_from_utf8(input);
-  std::vector<uint32_t> current_word;
+
+  // 1. Split by whitespace (Removed)
+  std::vector<std::string> words;
+  std::string current_word;
   for (uint32_t cp : cpts) {
     if (unicode_cpt_flags(cp).is_whitespace) {
       if (!current_word.empty()) {
-        std::string s;
-        for (uint32_t wcp : current_word) {
-          s += unicode_cpt_to_utf8(wcp);
-        }
-        words.push_back(s);
+        words.push_back(std::move(current_word));
         current_word.clear();
       }
     } else {
-      current_word.push_back(cp);
+      current_word += unicode_cpt_to_utf8(cp);
     }
   }
   if (!current_word.empty()) {
-    std::string s;
-    for (uint32_t wcp : current_word) {
-      s += unicode_cpt_to_utf8(wcp);
-    }
-    words.push_back(s);
+    words.push_back(std::move(current_word));
   }
 
-  // 2. Split by punctuation and CJK (behavior: Isolated)
+  // 2. Split by punctuation and CJK (Isolated)
   std::vector<std::string> final_tokens;
   for (const auto& word : words) {
     std::vector<uint32_t> word_cpts = unicode_cpts_from_utf8(word);
-    std::vector<uint32_t> current_token;
+    std::string current_token;
     for (uint32_t cp : word_cpts) {
       if (is_bert_punc(cp) || is_cjk(cp)) {
         if (!current_token.empty()) {
-          std::string s;
-          for (uint32_t tcp : current_token) {
-            s += unicode_cpt_to_utf8(tcp);
-          }
-          final_tokens.push_back(s);
+          final_tokens.push_back(std::move(current_token));
           current_token.clear();
         }
         final_tokens.push_back(unicode_cpt_to_utf8(cp));
       } else {
-        current_token.push_back(cp);
+        current_token += unicode_cpt_to_utf8(cp);
       }
     }
     if (!current_token.empty()) {
-      std::string s;
-      for (uint32_t tcp : current_token) {
-        s += unicode_cpt_to_utf8(tcp);
-      }
-      final_tokens.push_back(s);
+      final_tokens.push_back(std::move(current_token));
     }
   }
 
   return final_tokens;
+}
+
+// =============================================================================
+// MetaspacePreTokenizer
+// =============================================================================
+
+std::vector<std::string> MetaspacePreTokenizer::pre_tokenize(
+    const std::string& input) const {
+  // 1. Replace all spaces with the replacement character.
+  std::string transformed;
+  transformed.reserve(input.size() + replacement_.size());
+  for (size_t i = 0; i < input.size(); ++i) {
+    if (input[i] == ' ') {
+      transformed += replacement_;
+    } else {
+      transformed += input[i];
+    }
+  }
+
+  // 2. Prepend replacement character if scheme requires it.
+  if (prepend_scheme_ != PrependScheme::Never && !transformed.empty()) {
+    // Check if already starts with replacement
+    if (transformed.size() < replacement_.size() ||
+        transformed.compare(0, replacement_.size(), replacement_) != 0) {
+      transformed = replacement_ + transformed;
+    }
+  }
+
+  if (transformed.empty()) {
+    return {};
+  }
+
+  // 3. Split on the replacement character with MergedWithNext behavior.
+  if (!split_) {
+    return {transformed};
+  }
+
+  std::vector<std::string> results;
+  size_t pos = 0;
+  size_t rep_len = replacement_.size();
+
+  while (pos < transformed.size()) {
+    // Find the next occurrence of replacement after current position.
+    size_t next = transformed.find(replacement_, pos + rep_len);
+
+    if (next == std::string::npos) {
+      // No more delimiters — take the rest.
+      results.push_back(transformed.substr(pos));
+      break;
+    }
+    // Take from current position to (but not including) the next delimiter.
+    results.push_back(transformed.substr(pos, next - pos));
+    pos = next;
+  }
+
+  return results;
+}
+
+// =============================================================================
+// WhitespaceSplitPreTokenizer
+// =============================================================================
+
+std::vector<std::string> WhitespaceSplitPreTokenizer::pre_tokenize(
+    const std::string& input) const {
+  std::vector<std::string> results;
+  std::vector<uint32_t> cpts = unicode_cpts_from_utf8(input);
+  std::string current;
+
+  for (uint32_t cp : cpts) {
+    if (unicode_cpt_flags(cp).is_whitespace) {
+      if (!current.empty()) {
+        results.push_back(std::move(current));
+        current.clear();
+      }
+    } else {
+      current += unicode_cpt_to_utf8(cp);
+    }
+  }
+  if (!current.empty()) {
+    results.push_back(std::move(current));
+  }
+  return results;
+}
+
+// =============================================================================
+// PunctuationPreTokenizer
+// =============================================================================
+
+namespace {
+bool is_unicode_punctuation(uint32_t cp) {
+  // ASCII punctuation
+  if ((cp >= 33 && cp <= 47) || (cp >= 58 && cp <= 64) ||
+      (cp >= 91 && cp <= 96) || (cp >= 123 && cp <= 126)) {
+    return true;
+  }
+  return unicode_cpt_flags(cp).is_punctuation;
+}
+} // namespace
+
+std::vector<std::string> PunctuationPreTokenizer::pre_tokenize(
+    const std::string& input) const {
+  std::vector<uint32_t> cpts = unicode_cpts_from_utf8(input);
+  std::vector<std::string> results;
+  std::string current;
+  bool current_is_punc = false;
+
+  for (size_t i = 0; i < cpts.size(); ++i) {
+    uint32_t cp = cpts[i];
+    bool punc = is_unicode_punctuation(cp);
+
+    if (i == 0) {
+      current_is_punc = punc;
+      current = unicode_cpt_to_utf8(cp);
+      continue;
+    }
+
+    if (behavior_ == "Isolated") {
+      // Each punctuation char is its own token.
+      if (punc) {
+        if (!current.empty()) {
+          results.push_back(std::move(current));
+          current.clear();
+        }
+        results.push_back(unicode_cpt_to_utf8(cp));
+        current_is_punc = true;
+      } else {
+        if (current_is_punc) {
+          // Previous was punctuation (already pushed), start new word.
+          current_is_punc = false;
+        }
+        current += unicode_cpt_to_utf8(cp);
+      }
+    } else if (behavior_ == "Contiguous") {
+      // Consecutive punctuation chars form one token.
+      if (punc != current_is_punc) {
+        if (!current.empty()) {
+          results.push_back(std::move(current));
+          current.clear();
+        }
+        current_is_punc = punc;
+      }
+      current += unicode_cpt_to_utf8(cp);
+    } else if (behavior_ == "MergedWithPrevious") {
+      if (punc) {
+        current += unicode_cpt_to_utf8(cp);
+        results.push_back(std::move(current));
+        current.clear();
+        current_is_punc = true;
+      } else {
+        if (current_is_punc && !current.empty()) {
+          results.push_back(std::move(current));
+          current.clear();
+        }
+        current_is_punc = false;
+        current += unicode_cpt_to_utf8(cp);
+      }
+    } else if (behavior_ == "MergedWithNext") {
+      if (punc && !current_is_punc) {
+        if (!current.empty()) {
+          results.push_back(std::move(current));
+          current.clear();
+        }
+        current_is_punc = true;
+      } else if (!punc && current_is_punc) {
+        current_is_punc = false;
+      }
+      current += unicode_cpt_to_utf8(cp);
+    } else {
+      // Removed: drop punctuation
+      if (punc) {
+        if (!current.empty()) {
+          results.push_back(std::move(current));
+          current.clear();
+        }
+        current_is_punc = true;
+      } else {
+        current_is_punc = false;
+        current += unicode_cpt_to_utf8(cp);
+      }
+    }
+  }
+  if (!current.empty()) {
+    results.push_back(std::move(current));
+  }
+  return results;
+}
+
+// =============================================================================
+// CharDelimiterSplitPreTokenizer
+// =============================================================================
+
+std::vector<std::string> CharDelimiterSplitPreTokenizer::pre_tokenize(
+    const std::string& input) const {
+  std::vector<std::string> results;
+  size_t pos = 0;
+  size_t delim_len = delimiter_.size();
+
+  while (pos <= input.size()) {
+    size_t found = input.find(delimiter_, pos);
+    if (found == std::string::npos) {
+      std::string part = input.substr(pos);
+      if (!part.empty()) {
+        results.push_back(std::move(part));
+      }
+      break;
+    }
+    if (found > pos) {
+      results.push_back(input.substr(pos, found - pos));
+    }
+    pos = found + delim_len;
+  }
+  return results;
+}
+
+// =============================================================================
+// UnicodeScriptsPreTokenizer
+// =============================================================================
+
+namespace {
+
+// Simplified Unicode script categories.
+// Groups CJK-related scripts (Han, Hiragana, Katakana) together.
+enum class UScript {
+  Any,     // Spaces, common symbols — does not trigger boundaries.
+  Latin,
+  Han,     // Also covers Hiragana, Katakana.
+  Cyrillic,
+  Arabic,
+  Devanagari,
+  Bengali,
+  Greek,
+  Hebrew,
+  Thai,
+  Georgian,
+  Armenian,
+  Hangul,
+  Ethiopic,
+  Tamil,
+  Telugu,
+  Kannada,
+  Malayalam,
+  Myanmar,
+  Tibetan,
+  Other,   // Any script not listed above.
+};
+
+UScript get_script(uint32_t cp) {
+  // Space → Any (never triggers boundary)
+  if (cp == ' ') return UScript::Any;
+  // Common punctuation → Any
+  if (unicode_cpt_flags(cp).is_punctuation) return UScript::Any;
+  // Control, whitespace → Any
+  if (unicode_cpt_flags(cp).is_whitespace) return UScript::Any;
+
+  // Latin
+  if ((cp >= 0x0041 && cp <= 0x024F) ||
+      (cp >= 0x1E00 && cp <= 0x1EFF) ||
+      (cp >= 0x2C60 && cp <= 0x2C7F) ||
+      (cp >= 0xA720 && cp <= 0xA7FF) ||
+      (cp >= 0xFB00 && cp <= 0xFB06))
+    return UScript::Latin;
+
+  // Cyrillic
+  if ((cp >= 0x0400 && cp <= 0x052F) ||
+      (cp >= 0x2DE0 && cp <= 0x2DFF) ||
+      (cp >= 0xA640 && cp <= 0xA69F))
+    return UScript::Cyrillic;
+
+  // Greek
+  if ((cp >= 0x0370 && cp <= 0x03FF) ||
+      (cp >= 0x1F00 && cp <= 0x1FFF))
+    return UScript::Greek;
+
+  // Arabic
+  if ((cp >= 0x0600 && cp <= 0x06FF) ||
+      (cp >= 0x0750 && cp <= 0x077F) ||
+      (cp >= 0x08A0 && cp <= 0x08FF) ||
+      (cp >= 0xFB50 && cp <= 0xFDFF) ||
+      (cp >= 0xFE70 && cp <= 0xFEFF))
+    return UScript::Arabic;
+
+  // Hebrew
+  if ((cp >= 0x0590 && cp <= 0x05FF) ||
+      (cp >= 0xFB1D && cp <= 0xFB4F))
+    return UScript::Hebrew;
+
+  // Devanagari
+  if (cp >= 0x0900 && cp <= 0x097F) return UScript::Devanagari;
+
+  // Bengali
+  if (cp >= 0x0980 && cp <= 0x09FF) return UScript::Bengali;
+
+  // Tamil
+  if (cp >= 0x0B80 && cp <= 0x0BFF) return UScript::Tamil;
+
+  // Telugu
+  if (cp >= 0x0C00 && cp <= 0x0C7F) return UScript::Telugu;
+
+  // Kannada
+  if (cp >= 0x0C80 && cp <= 0x0CFF) return UScript::Kannada;
+
+  // Malayalam
+  if (cp >= 0x0D00 && cp <= 0x0D7F) return UScript::Malayalam;
+
+  // Thai
+  if (cp >= 0x0E00 && cp <= 0x0E7F) return UScript::Thai;
+
+  // Georgian
+  if ((cp >= 0x10A0 && cp <= 0x10FF) ||
+      (cp >= 0x2D00 && cp <= 0x2D2F))
+    return UScript::Georgian;
+
+  // Armenian
+  if (cp >= 0x0530 && cp <= 0x058F) return UScript::Armenian;
+
+  // Tibetan
+  if (cp >= 0x0F00 && cp <= 0x0FFF) return UScript::Tibetan;
+
+  // Myanmar
+  if (cp >= 0x1000 && cp <= 0x109F) return UScript::Myanmar;
+
+  // Ethiopic
+  if (cp >= 0x1200 && cp <= 0x137F) return UScript::Ethiopic;
+
+  // Hangul
+  if ((cp >= 0x1100 && cp <= 0x11FF) ||
+      (cp >= 0x3130 && cp <= 0x318F) ||
+      (cp >= 0xAC00 && cp <= 0xD7AF))
+    return UScript::Hangul;
+
+  // CJK Unified + Extensions, Hiragana, Katakana → Han
+  // Hiragana
+  if (cp >= 0x3040 && cp <= 0x309F) return UScript::Han;
+  // Katakana
+  if (cp >= 0x30A0 && cp <= 0x30FF) return UScript::Han;
+  // CJK prolonged sound mark → Han
+  if (cp == 0x30FC) return UScript::Han;
+  // CJK
+  if (is_cjk(cp)) return UScript::Han;
+  // CJK Symbols and Punctuation
+  if (cp >= 0x3000 && cp <= 0x303F) return UScript::Han;
+
+  // Numbers and common symbols → Any
+  if (cp >= 0x0030 && cp <= 0x0039) return UScript::Any;
+  if (unicode_cpt_flags(cp).is_number) return UScript::Any;
+  if (unicode_cpt_flags(cp).is_symbol) return UScript::Any;
+
+  return UScript::Other;
+}
+
+} // namespace
+
+std::vector<std::string> UnicodeScriptsPreTokenizer::pre_tokenize(
+    const std::string& input) const {
+  std::vector<uint32_t> cpts = unicode_cpts_from_utf8(input);
+  if (cpts.empty()) {
+    return {};
+  }
+
+  std::vector<std::string> results;
+  std::string current;
+  UScript prev_script = UScript::Any;
+
+  for (uint32_t cp : cpts) {
+    UScript script = get_script(cp);
+    // Script::Any never triggers a boundary.
+    if (script != UScript::Any && prev_script != UScript::Any &&
+        script != prev_script) {
+      if (!current.empty()) {
+        results.push_back(std::move(current));
+        current.clear();
+      }
+    }
+    current += unicode_cpt_to_utf8(cp);
+    if (script != UScript::Any) {
+      prev_script = script;
+    }
+  }
+  if (!current.empty()) {
+    results.push_back(std::move(current));
+  }
+  return results;
+}
+
+// =============================================================================
+// FixedLengthPreTokenizer
+// =============================================================================
+
+std::vector<std::string> FixedLengthPreTokenizer::pre_tokenize(
+    const std::string& input) const {
+  // Split by character count (not byte count).
+  std::vector<uint32_t> cpts = unicode_cpts_from_utf8(input);
+  if (cpts.empty() || length_ == 0) {
+    return {};
+  }
+
+  std::vector<std::string> results;
+  std::string current;
+  size_t char_count = 0;
+
+  for (uint32_t cp : cpts) {
+    current += unicode_cpt_to_utf8(cp);
+    ++char_count;
+    if (char_count >= length_) {
+      results.push_back(std::move(current));
+      current.clear();
+      char_count = 0;
+    }
+  }
+  if (!current.empty()) {
+    results.push_back(std::move(current));
+  }
+  return results;
 }
 
 } // namespace tokenizers
