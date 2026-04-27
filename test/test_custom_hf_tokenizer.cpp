@@ -62,6 +62,11 @@ NormalizerBehavior detect_normalizer_behavior(const json& normalizer) {
   if (type == "BertNormalizer" && normalizer.value("lowercase", false)) {
     return NormalizerBehavior::LossyIdempotent;
   }
+  if (type == "Precompiled") {
+    // Precompiled normalizer does NFKC-like normalization which is lossy
+    // (e.g. full-width chars → ASCII) but idempotent on second pass.
+    return NormalizerBehavior::LossyIdempotent;
+  }
   if (type == "Sequence" && normalizer.contains("normalizers")) {
     for (const auto& n : normalizer["normalizers"]) {
       auto sub = detect_normalizer_behavior(n);
@@ -179,14 +184,21 @@ INSTANTIATE_TEST_SUITE_P(
         "bielik",
         "phi",
         "minilm",
+        "minilm_l12",
         "hammer",
         "qwen2_5",
         "qwen3",
         "llama",
         "smollm",
+        "lfm2vl",
         "lfm2",
+        "gemma3",
         "gemma4",
-        "glmOCR"));
+        "glmOCR",
+        "gpt2",
+        "camemBERT",
+        "t5small",
+        "roberta"));
 
 TEST_P(CustomHFTokenizerTest, SimpleEncodeDecode) {
   assert_round_trip("Hello world!");

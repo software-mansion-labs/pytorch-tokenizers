@@ -68,14 +68,21 @@ INSTANTIATE_TEST_SUITE_P(
         "bielik",
         "phi",
         "minilm",
+        "minilm_l12",
         "hammer",
         "qwen2_5",
         "qwen3",
         "llama",
         "smollm",
         "lfm2",
+        "lfm2vl",
+        "gemma3",
         "gemma4",
-        "glmOCR"));
+        "glmOCR",
+        "gpt2",
+        "camemBERT",
+        "t5small",
+        "roberta"));
 
 TEST_P(GroundTruthComparisonTest, VocabSizeMatches) {
   ASSERT_TRUE(ground_truth_.contains("vocab_size"))
@@ -106,7 +113,7 @@ TEST_P(GroundTruthComparisonTest, AllTestCasesMatch) {
     std::string input = test_case["input"];
     std::vector<int32_t> expected_tokens = test_case["tokens"];
 
-    auto encode_result = tokenizer_.encode(input, 0, 0);  // no BOS/EOS
+    auto encode_result = tokenizer_.encode(input, 0, 0); // no BOS/EOS
     ASSERT_TRUE(encode_result.ok())
         << "Encoding failed for test case " << case_num << " (input: \""
         << input << "\") in " << model_name_;
@@ -345,7 +352,8 @@ TEST_P(GroundTruthComparisonTest, PieceToIdMatches) {
 }
 
 // Stronger end-to-end check: decode(encode(input)) must match Rust reference's
-// decode(rust_tokens), catching cases where tokens are correct but decoding diverges.
+// decode(rust_tokens), catching cases where tokens are correct but decoding
+// diverges.
 TEST_P(GroundTruthComparisonTest, DecodeOwnTokensMatches) {
   ASSERT_TRUE(ground_truth_.contains("test_cases"))
       << "Ground truth missing test_cases for " << model_name_;
