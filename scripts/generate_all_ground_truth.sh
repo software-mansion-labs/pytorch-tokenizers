@@ -67,6 +67,7 @@ echo ""
 MODELS=(
     "phi"
     "minilm"
+    "minilm_l12"
     "bielik"
     "hammer"
     "qwen2_5"
@@ -74,8 +75,14 @@ MODELS=(
     "qwen3"
     "smollm"
     "lfm2"
+    "lfm2vl"
+    "gemma3"
     "gemma4"
     "glmOCR"
+    "gpt2"
+    "camemBERT"
+    "t5small"
+    "roberta"
 )
 
 export RESOURCES_PATH="$RESOURCES_DIR"
