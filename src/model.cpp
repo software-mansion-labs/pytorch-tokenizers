@@ -39,9 +39,20 @@ Error parse_special_tokens(
     if (json_config.contains("added_tokens")) {
       const auto& added_tokens = json_config.at("added_tokens");
       std::vector<std::pair<std::string, uint64_t>> sp_pairs;
+      std::vector<std::pair<std::string, uint64_t>> all_pairs;
       for (const auto& entry : added_tokens) {
         std::string content = entry.at("content").get<std::string>();
-        sp_pairs.emplace_back(content, entry.at("id").get<uint64_t>());
+        uint64_t id = entry.at("id").get<uint64_t>();
+        // All added_tokens go into all_pairs (for encoding regex — HF
+        // matches every added_token as a never-split unit during encoding).
+        all_pairs.emplace_back(content, id);
+        // Only tokens with "special": true are true special tokens
+        // (used for is_special_token / skip_special_tokens in decoding
+        // and for filtering from the model vocab to avoid BPE conflicts).
+        // Default to true when field is missing (older HF formats).
+        if (entry.value("special", !entry.contains("special"))) {
+          sp_pairs.emplace_back(content, id);
+        }
         if (entry.value("rstrip", false)) {
           config.rstrip_tokens.insert(content);
         }
@@ -50,6 +61,7 @@ Error parse_special_tokens(
         }
       }
       config.set_special_token_pairs(std::move(sp_pairs));
+      config.set_all_added_token_pairs(std::move(all_pairs));
     }
   } catch (const std::exception& e) {
     TK_LOG(Info, "Could not parse special tokens: %s", e.what());
@@ -290,19 +302,31 @@ Model::Ptr ModelConfig::create() const {
       token_pairs.value_or(std::vector<std::pair<std::string, uint64_t>>());
   const auto& raw_special_pairs = special_token_pairs.value_or(
       std::vector<std::pair<std::string, uint64_t>>());
+  const auto& raw_all_added_pairs = all_added_token_pairs.value_or(
+      raw_special_pairs); // fallback to special_token_pairs if not set
 
-  // Filter out special tokens from vocab if they were included
+  // Filter out truly-special tokens from vocab (only special=true tokens).
+  // Non-special added_tokens (e.g. gemma3's 6406 vocab entries) must remain
+  // in the model vocab for BPE merges to work.
+  std::unordered_set<uint64_t> special_ids;
+  for (const auto& sp : raw_special_pairs) {
+    special_ids.insert(sp.second);
+  }
+  std::unordered_set<uint64_t> model_ids;
   std::vector<std::pair<std::string, uint64_t>> model_token_pairs;
   for (const auto& tp : raw_token_pairs) {
-    bool is_special = false;
-    for (const auto& sp : raw_special_pairs) {
-      if (sp.second == tp.second) {
-        is_special = true;
-        break;
-      }
-    }
-    if (!is_special) {
+    if (special_ids.find(tp.second) == special_ids.end()) {
       model_token_pairs.push_back(tp);
+      model_ids.insert(tp.second);
+    }
+  }
+  // Add non-special added_tokens that aren't already in the model vocab.
+  // These tokens (e.g. <|tool|> in phi) need to be in token_map for
+  // vocab_size counting and piece_to_id lookups.
+  for (const auto& ap : raw_all_added_pairs) {
+    if (special_ids.find(ap.second) == special_ids.end() &&
+        model_ids.find(ap.second) == model_ids.end()) {
+      model_token_pairs.push_back(ap);
     }
   }
 
@@ -320,7 +344,8 @@ Model::Ptr ModelConfig::create() const {
   auto ids = resolve_sequence_tokens(*this, token_map, special_token_map);
 
   if (type == "BPE") {
-    // Build special token regex
+    // Model's regex: only special=true tokens (for standalone encode).
+    // HFTokenizer builds its own regex from ALL added tokens.
     std::unique_ptr<IRegex> special_token_regex;
     auto special_token_regex_res =
         detail::build_special_token_regex(special_token_map);
@@ -403,7 +428,7 @@ Model::Ptr ModelConfig::create() const {
       resolved_unk = ids.unk_token_id;
     }
 
-    // Build special token regex.
+    // Model's regex: only special=true tokens.
     std::unique_ptr<IRegex> special_token_regex;
     auto regex_res = detail::build_special_token_regex(special_token_map);
     if (regex_res.ok()) {
