@@ -20,7 +20,9 @@
 // Local
 #include <nlohmann/json.hpp>
 #include <pytorch/tokenizers/error.h>
+#include <pytorch/tokenizers/map_utils.h>
 #include <pytorch/tokenizers/model.h>
+#include <pytorch/tokenizers/regex.h>
 #include <pytorch/tokenizers/normalizer.h>
 #include <pytorch/tokenizers/padding.h>
 #include <pytorch/tokenizers/post_processor.h>
@@ -84,6 +86,13 @@ class HFTokenizer : public Tokenizer {
   Padding::Ptr _padding;
 
   Model::Ptr _model;
+
+  // Regex matching ALL added_tokens (both special and non-special).
+  // HF matches every added_token as a never-split unit during encoding.
+  // This is separate from the model's special_token_regex which only
+  // contains special=true tokens (for standalone model.tokenize()).
+  std::unique_ptr<IRegex> _added_token_regex;
+  std::unique_ptr<detail::TokenMap> _added_token_map;
 };
 
 } // namespace tokenizers

@@ -129,6 +129,8 @@ class ModelConfig {
   using TokenPairs = std::vector<std::pair<std::string, uint64_t>>;
   MODEL_CONFIG_MEMBER(TokenPairs, token_pairs)
   MODEL_CONFIG_MEMBER(TokenPairs, special_token_pairs)
+  // All added_tokens (special + non-special) — used for encoding regex only.
+  MODEL_CONFIG_MEMBER(TokenPairs, all_added_token_pairs)
 
   // Tokens with rstrip=true consume leading whitespace after the token;
   // tokens with lstrip=true consume trailing whitespace before the token.

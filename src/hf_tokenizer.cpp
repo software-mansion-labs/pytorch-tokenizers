@@ -95,8 +95,34 @@ HFTokenizer::encode(const std::string& input, int8_t bos, int8_t eos) const {
   size_t offset = 0;
 
   while (offset < input.size()) {
-    auto [special, sub_input] =
-        _model->split_with_allowed_special_token(input, offset);
+    // Use HFTokenizer's own regex (all added_tokens) if available,
+    // otherwise fall back to the model's regex (special-only).
+    std::optional<std::string> special;
+    std::string sub_input;
+    if (_added_token_regex) {
+      // Find the first added_token match in the remaining input.
+      auto matches = _added_token_regex->find_all(input.substr(offset));
+      bool found = false;
+      for (const auto& m : matches) {
+        std::string matched =
+            input.substr(offset + m.start, m.end - m.start);
+        if (_added_token_map->tryGetInteger(matched).has_value() ||
+            _model->piece_to_id(matched).ok()) {
+          special = matched;
+          sub_input = input.substr(offset, m.start);
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        sub_input = input.substr(offset);
+      }
+    } else {
+      auto split_result =
+          _model->split_with_allowed_special_token(input, offset);
+      special = split_result.first;
+      sub_input = split_result.second;
+    }
 
     // lstrip: preserve original size for offset advancement, strip trailing
     // spaces from sub_input so they aren't encoded before the special token
@@ -359,6 +385,23 @@ Error HFTokenizer::setup_model(
   vocab_size_ = _model->vocab_size();
   bos_tok_ = _model->bos_token_id();
   eos_tok_ = _model->eos_token_id();
+
+  // Build regex from ALL added_tokens (both special and non-special).
+  // HF matches every added_token as a never-split unit on the raw input
+  // BEFORE normalization. The model's own regex only has special=true
+  // tokens (for standalone model.tokenize()).
+  if (model_config.all_added_token_pairs) {
+    auto map_res =
+        detail::build_token_map(*model_config.all_added_token_pairs);
+    if (map_res.ok()) {
+      _added_token_map =
+          std::make_unique<detail::TokenMap>(std::move(*map_res));
+      auto regex_res = detail::build_special_token_regex(*_added_token_map);
+      if (regex_res.ok()) {
+        _added_token_regex = std::move(*regex_res);
+      }
+    }
+  }
 
   return Error::Ok;
 }

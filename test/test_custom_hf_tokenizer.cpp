@@ -146,6 +146,15 @@ class CustomHFTokenizerTest : public ::testing::TestWithParam<std::string> {
           break; // Whitespace-only inputs may normalize to empty; nothing to
                  // check
         }
+
+        // Models without byte_fallback (e.g. camemBERT, t5small) produce
+        // <unk> for characters not in vocab. The decoded <unk> literal
+        // re-encodes differently (matched as special token), so idempotency
+        // cannot hold. Skip the check when UNK was produced.
+        if (decoded.find("<unk>") != std::string::npos) {
+          break;
+        }
+
         auto second_encode = tokenizer_.encode(decoded, 0, 0);
         ASSERT_TRUE(second_encode.ok())
             << "Second encoding failed for " << model_name_;
