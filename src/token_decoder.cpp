@@ -10,8 +10,6 @@
 #include <pytorch/tokenizers/token_decoder.h>
 
 #include <pytorch/tokenizers/log.h>
-// Standard
-#include <cstdarg>
 
 // Third Party
 #include <nlohmann/json.hpp>
@@ -33,24 +31,22 @@ TokenDecoder::Ptr TokenDecoderConfig::create() const {
   //  tokenizers library
   //  https://github.com/huggingface/tokenizers/blob/main/tokenizers/src/decoders/mod.rs#L55
   if (type == "ByteLevel") {
-    return TokenDecoder::Ptr(new ByteLevelTokenDecoder());
+    return std::make_unique<ByteLevelTokenDecoder>();
   } else if (type == "Replace") {
-    // Use parsed pattern and content from JSON
-    return TokenDecoder::Ptr(new ReplaceTokenDecoder(
-        replace_pattern.value_or(""), replace_content.value_or("")));
+    return std::make_unique<ReplaceTokenDecoder>(
+        replace_pattern.value_or(""), replace_content.value_or(""));
   } else if (type == "ByteFallback") {
-    return TokenDecoder::Ptr(new ByteFallbackTokenDecoder());
+    return std::make_unique<ByteFallbackTokenDecoder>();
   } else if (type == "Fuse") {
-    return TokenDecoder::Ptr(new FuseTokenDecoder());
+    return std::make_unique<FuseTokenDecoder>();
   } else if (type == "Strip") {
-    // Use parsed content, start, and stop from JSON
-    return TokenDecoder::Ptr(new StripTokenDecoder(
+    return std::make_unique<StripTokenDecoder>(
         strip_content.value_or(""),
         strip_start.value_or(0),
-        strip_stop.value_or(0)));
+        strip_stop.value_or(0));
   } else if (type == "WordPiece") {
-    return TokenDecoder::Ptr(new WordPieceTokenDecoder(
-        wordpiece_prefix.value_or("##"), wordpiece_cleanup.value_or(true)));
+    return std::make_unique<WordPieceTokenDecoder>(
+        wordpiece_prefix.value_or("##"), wordpiece_cleanup.value_or(true));
   } else if (type == "Sequence") {
     std::vector<TokenDecoder::Ptr> decoders;
     if (sequence_decoders) {
@@ -60,19 +56,19 @@ TokenDecoder::Ptr TokenDecoderConfig::create() const {
         decoders.push_back(sub_config.create());
       }
     }
-    return TokenDecoder::Ptr(new SequenceTokenDecoder(std::move(decoders)));
+    return std::make_unique<SequenceTokenDecoder>(std::move(decoders));
   } else if (type == "Metaspace") {
-    return TokenDecoder::Ptr(new MetaspaceTokenDecoder(
+    return std::make_unique<MetaspaceTokenDecoder>(
         metaspace_replacement.value_or("\xe2\x96\x81"),
-        metaspace_prepend_scheme.value_or("always")));
+        metaspace_prepend_scheme.value_or("always"));
   } else if (type == "BPEDecoder") {
-    return TokenDecoder::Ptr(
-        new BPETokenDecoder(bpe_suffix.value_or("</w>")));
+    return std::make_unique<BPETokenDecoder>(
+        bpe_suffix.value_or("</w>"));
   } else if (type == "CTC") {
-    return TokenDecoder::Ptr(new CTCTokenDecoder(
+    return std::make_unique<CTCTokenDecoder>(
         ctc_pad_token.value_or("<pad>"),
         ctc_word_delimiter_token.value_or("|"),
-        ctc_cleanup.value_or(true)));
+        ctc_cleanup.value_or(true));
   }
   throw std::runtime_error("Unsupported TokenDecoder type: " + type);
 }
@@ -148,27 +144,6 @@ TokenDecoderConfig& TokenDecoderConfig::parse_json(const json& json_config) {
 
 // ByteLevel ///////////////////////////////////////////////////////////////////
 
-namespace {
-
-// Copied from llama.cpp
-// CITE:
-// https://github.com/ggerganov/llama.cpp/blob/master/src/llama-vocab.cpp#L20
-static std::string format(const char* fmt, ...) {
-  va_list ap;
-  va_list ap2;
-  va_start(ap, fmt);
-  va_copy(ap2, ap);
-  int size = vsnprintf(NULL, 0, fmt, ap);
-  // GGML_ASSERT(size >= 0 && size < INT_MAX); // NOLINT
-  std::vector<char> buf(size + 1);
-  // int size2 = vsnprintf(buf.data(), size + 1, fmt, ap2);
-  // GGML_ASSERT(size2 == size);
-  va_end(ap2);
-  va_end(ap);
-  return std::string(buf.data(), size);
-}
-
-} // namespace
 
 std::vector<std::string> ByteLevelTokenDecoder::decode(
     const std::vector<std::string>& tokens) const {
@@ -326,11 +301,16 @@ std::vector<std::string> StripTokenDecoder::decode(
 //  FuseTokenDecoder ///////////////////////////////////////////////////////
 std::vector<std::string> FuseTokenDecoder::decode(
     const std::vector<std::string>& tokens) const {
-  std::string fusedToken = "";
-  for (auto& token : tokens) {
-    fusedToken += token;
+  size_t total = 0;
+  for (const auto& token : tokens) {
+    total += token.size();
   }
-  return {fusedToken};
+  std::string fused;
+  fused.reserve(total);
+  for (const auto& token : tokens) {
+    fused += token;
+  }
+  return {fused};
 }
 
 // SequenceTokenDecoder ///////////////////////////////////////////////////////

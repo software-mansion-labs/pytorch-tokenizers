@@ -28,7 +28,7 @@ namespace tokenizers {
 
 class Normalizer {
  public:
-  typedef std::shared_ptr<Normalizer> Ptr;
+  using Ptr = std::unique_ptr<Normalizer>;
 
   virtual std::string normalize(const std::string& input) const = 0;
   virtual ~Normalizer() = default;

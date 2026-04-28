@@ -12,7 +12,8 @@
 
 #include <nlohmann/json.hpp>
 #include <fstream>
-#include <set>
+#include <map>
+#include <memory>
 
 namespace tokenizers {
 
@@ -63,8 +64,6 @@ NormalizerBehavior detect_normalizer_behavior(const json& normalizer) {
     return NormalizerBehavior::LossyIdempotent;
   }
   if (type == "Precompiled") {
-    // Precompiled normalizer does NFKC-like normalization which is lossy
-    // (e.g. full-width chars → ASCII) but idempotent on second pass.
     return NormalizerBehavior::LossyIdempotent;
   }
   if (type == "Sequence" && normalizer.contains("normalizers")) {
@@ -78,42 +77,71 @@ NormalizerBehavior detect_normalizer_behavior(const json& normalizer) {
   return NormalizerBehavior::Lossless;
 }
 
+struct CachedCustomModel {
+  std::unique_ptr<HFTokenizer> tokenizer;
+  json config;
+  bool has_post_processor = false;
+  NormalizerBehavior normalizer = NormalizerBehavior::Lossless;
+  std::string bos_token_str;
+  std::string eos_token_str;
+};
+
+std::map<std::string, CachedCustomModel>& get_custom_cache() {
+  static std::map<std::string, CachedCustomModel> cache;
+  return cache;
+}
+
 class CustomHFTokenizerTest : public ::testing::TestWithParam<std::string> {
  protected:
   void SetUp() override {
     model_name_ = GetParam();
-    tokenizer_dir_ = _get_resource_path(model_name_ + "_tokenizer_dir/");
 
-    auto error = tokenizer_.load(tokenizer_dir_);
-    ASSERT_EQ(error, Error::Ok)
-        << "Failed to load tokenizer for " << model_name_;
+    auto& cache = get_custom_cache();
+    auto it = cache.find(model_name_);
+    if (it == cache.end()) {
+      auto tokenizer_dir = _get_resource_path(model_name_ + "_tokenizer_dir/");
+      auto entry = CachedCustomModel{};
+      entry.tokenizer = std::make_unique<HFTokenizer>();
+      auto error = entry.tokenizer->load(tokenizer_dir);
+      ASSERT_EQ(error, Error::Ok)
+          << "Failed to load tokenizer for " << model_name_;
 
-    config_ = load_json_file(tokenizer_dir_ + "tokenizer_config.json");
+      entry.config = load_json_file(tokenizer_dir + "tokenizer_config.json");
 
-    auto tokenizer_json = load_json_file(tokenizer_dir_ + "tokenizer.json");
-    has_post_processor_ = tokenizer_json.contains("post_processor") &&
-        !tokenizer_json["post_processor"].is_null();
+      auto tokenizer_json = load_json_file(tokenizer_dir + "tokenizer.json");
+      entry.has_post_processor = tokenizer_json.contains("post_processor") &&
+          !tokenizer_json["post_processor"].is_null();
 
-    if (tokenizer_json.contains("normalizer")) {
-      normalizer_ = detect_normalizer_behavior(tokenizer_json["normalizer"]);
+      if (tokenizer_json.contains("normalizer")) {
+        entry.normalizer =
+            detect_normalizer_behavior(tokenizer_json["normalizer"]);
+      }
+
+      if (entry.config.contains("bos_token")) {
+        entry.bos_token_str = extract_token_string(entry.config["bos_token"]);
+      }
+      if (entry.config.contains("eos_token")) {
+        entry.eos_token_str = extract_token_string(entry.config["eos_token"]);
+      }
+
+      it = cache.emplace(model_name_, std::move(entry)).first;
     }
 
-    if (config_.contains("bos_token")) {
-      bos_token_str_ = extract_token_string(config_["bos_token"]);
-    }
-    if (config_.contains("eos_token")) {
-      eos_token_str_ = extract_token_string(config_["eos_token"]);
-    }
+    tokenizer_ = it->second.tokenizer.get();
+    has_post_processor_ = it->second.has_post_processor;
+    normalizer_ = it->second.normalizer;
+    bos_token_str_ = it->second.bos_token_str;
+    eos_token_str_ = it->second.eos_token_str;
   }
 
   void assert_round_trip(const std::string& text) {
-    auto encode_result = tokenizer_.encode(text, 0, 0);
+    auto encode_result = tokenizer_->encode(text, 0, 0);
     ASSERT_TRUE(encode_result.ok())
         << "Encoding failed for " << model_name_ << ": \"" << text << "\"";
 
     auto tokens = encode_result.get();
 
-    auto decode_result = tokenizer_.decode(tokens);
+    auto decode_result = tokenizer_->decode(tokens);
     ASSERT_TRUE(decode_result.ok())
         << "Decoding failed for " << model_name_ << ": \"" << text << "\"";
 
@@ -140,26 +168,18 @@ class CustomHFTokenizerTest : public ::testing::TestWithParam<std::string> {
       }
 
       case NormalizerBehavior::LossyIdempotent: {
-        // Normalization is lossy (e.g. lowercasing, whitespace stripping)
-        // but a second round-trip must produce identical results
         if (decoded.empty()) {
-          break; // Whitespace-only inputs may normalize to empty; nothing to
-                 // check
+          break;
         }
-
-        // Models without byte_fallback (e.g. camemBERT, t5small) produce
-        // <unk> for characters not in vocab. The decoded <unk> literal
-        // re-encodes differently (matched as special token), so idempotency
-        // cannot hold. Skip the check when UNK was produced.
         if (decoded.find("<unk>") != std::string::npos) {
           break;
         }
 
-        auto second_encode = tokenizer_.encode(decoded, 0, 0);
+        auto second_encode = tokenizer_->encode(decoded, 0, 0);
         ASSERT_TRUE(second_encode.ok())
             << "Second encoding failed for " << model_name_;
 
-        auto second_decode = tokenizer_.decode(second_encode.get());
+        auto second_decode = tokenizer_->decode(second_encode.get());
         ASSERT_TRUE(second_decode.ok())
             << "Second decoding failed for " << model_name_;
 
@@ -177,9 +197,7 @@ class CustomHFTokenizerTest : public ::testing::TestWithParam<std::string> {
   }
 
   std::string model_name_;
-  std::string tokenizer_dir_;
-  HFTokenizer tokenizer_;
-  json config_;
+  const HFTokenizer* tokenizer_ = nullptr;
   bool has_post_processor_ = false;
   NormalizerBehavior normalizer_ = NormalizerBehavior::Lossless;
   std::string bos_token_str_;
@@ -220,18 +238,18 @@ TEST_P(CustomHFTokenizerTest, LongEncodeDecode) {
 }
 
 TEST_P(CustomHFTokenizerTest, EmptyAndWhitespaceStrings) {
-  auto result_empty = tokenizer_.encode("", 0, 0);
+  auto result_empty = tokenizer_->encode("", 0, 0);
   ASSERT_TRUE(result_empty.ok());
 
   std::vector<std::string> whitespace_inputs = {"   ", "\t\n  \n\t"};
   for (const auto& ws : whitespace_inputs) {
-    auto encode_result = tokenizer_.encode(ws, 0, 0);
+    auto encode_result = tokenizer_->encode(ws, 0, 0);
     ASSERT_TRUE(encode_result.ok())
         << "Encoding whitespace failed for " << model_name_;
 
     auto tokens = encode_result.get();
     if (!tokens.empty()) {
-      auto decode_result = tokenizer_.decode(tokens);
+      auto decode_result = tokenizer_->decode(tokens);
       ASSERT_TRUE(decode_result.ok())
           << "Decoding whitespace failed for " << model_name_;
     }
@@ -247,12 +265,12 @@ TEST_P(CustomHFTokenizerTest, CodeLikeContent) {
 }
 
 TEST_P(CustomHFTokenizerTest, IdToPieceOutOfRange) {
-  auto vocab_size = tokenizer_.vocab_size();
+  auto vocab_size = tokenizer_->vocab_size();
 
-  auto result_valid = tokenizer_.id_to_piece(0);
+  auto result_valid = tokenizer_->id_to_piece(0);
   EXPECT_TRUE(result_valid.ok());
 
-  auto result_invalid = tokenizer_.id_to_piece(vocab_size + 1000);
+  auto result_invalid = tokenizer_->id_to_piece(vocab_size + 1000);
   EXPECT_FALSE(result_invalid.ok());
   EXPECT_EQ(result_invalid.error(), Error::OutOfRange);
 }
@@ -261,10 +279,10 @@ TEST_P(CustomHFTokenizerTest, PieceToIdAndBack) {
   std::vector<std::string> test_pieces = {" ", "a", "the", ".", ","};
 
   for (const auto& piece : test_pieces) {
-    auto id_result = tokenizer_.piece_to_id(piece);
+    auto id_result = tokenizer_->piece_to_id(piece);
     if (id_result.ok()) {
       auto id = id_result.get();
-      auto piece_result = tokenizer_.id_to_piece(id);
+      auto piece_result = tokenizer_->id_to_piece(id);
       ASSERT_TRUE(piece_result.ok())
           << "id_to_piece failed for ID " << id << " (piece: \"" << piece
           << "\") in " << model_name_;
@@ -277,49 +295,46 @@ TEST_P(CustomHFTokenizerTest, PieceToIdAndBack) {
 
 TEST_P(CustomHFTokenizerTest, BosEosTokenIdsMatchConfig) {
   if (!bos_token_str_.empty()) {
-    auto id_result = tokenizer_.piece_to_id(bos_token_str_);
+    auto id_result = tokenizer_->piece_to_id(bos_token_str_);
     if (id_result.ok()) {
-      EXPECT_EQ(tokenizer_.bos_tok(), id_result.get())
+      EXPECT_EQ(tokenizer_->bos_tok(), id_result.get())
           << "BOS token ID mismatch for " << model_name_ << "\n"
           << "Config bos_token: \"" << bos_token_str_ << "\"\n"
           << "piece_to_id result: " << id_result.get() << "\n"
-          << "bos_tok() result: " << tokenizer_.bos_tok();
+          << "bos_tok() result: " << tokenizer_->bos_tok();
     }
   }
 
   if (!eos_token_str_.empty()) {
-    auto id_result = tokenizer_.piece_to_id(eos_token_str_);
+    auto id_result = tokenizer_->piece_to_id(eos_token_str_);
     if (id_result.ok()) {
-      EXPECT_EQ(tokenizer_.eos_tok(), id_result.get())
+      EXPECT_EQ(tokenizer_->eos_tok(), id_result.get())
           << "EOS token ID mismatch for " << model_name_ << "\n"
           << "Config eos_token: \"" << eos_token_str_ << "\"\n"
           << "piece_to_id result: " << id_result.get() << "\n"
-          << "eos_tok() result: " << tokenizer_.eos_tok();
+          << "eos_tok() result: " << tokenizer_->eos_tok();
     }
   }
 
-  auto vocab_size = tokenizer_.vocab_size();
-  EXPECT_LT(tokenizer_.bos_tok(), static_cast<uint64_t>(vocab_size))
+  auto vocab_size = tokenizer_->vocab_size();
+  EXPECT_LT(tokenizer_->bos_tok(), static_cast<uint64_t>(vocab_size))
       << "BOS token ID out of vocab range for " << model_name_;
-  EXPECT_LT(tokenizer_.eos_tok(), static_cast<uint64_t>(vocab_size))
+  EXPECT_LT(tokenizer_->eos_tok(), static_cast<uint64_t>(vocab_size))
       << "EOS token ID out of vocab range for " << model_name_;
 }
 
 TEST_P(CustomHFTokenizerTest, SpecialTokensWithPostProcessor) {
   std::string text = "Test";
 
-  auto result_without_special = tokenizer_.encode(text, 0, 0);
+  auto result_without_special = tokenizer_->encode(text, 0, 0);
   ASSERT_TRUE(result_without_special.ok());
   auto tokens_without = result_without_special.get();
 
-  auto result_with_special = tokenizer_.encode(text, 1, 1);
+  auto result_with_special = tokenizer_->encode(text, 1, 1);
   ASSERT_TRUE(result_with_special.ok());
   auto tokens_with = result_with_special.get();
 
   if (!has_post_processor_) {
-    // No post-processor: special token insertion is the post-processor's
-    // responsibility (matches Rust HF tokenizers behavior), so encode(1,1)
-    // must equal encode(0,0).
     EXPECT_EQ(tokens_with, tokens_without)
         << "Model " << model_name_ << " has no post-processor but "
         << "encode(text, 1, 1) differs from encode(text, 0, 0)\n"
@@ -338,21 +353,21 @@ TEST_P(CustomHFTokenizerTest, BosEosDoesNotAffectLengthWithoutPostProcessor) {
 
   std::string text = "Test sentence";
 
-  auto result_base = tokenizer_.encode(text, 0, 0);
+  auto result_base = tokenizer_->encode(text, 0, 0);
   ASSERT_TRUE(result_base.ok());
   auto tokens_base = result_base.get();
 
-  auto result_bos = tokenizer_.encode(text, 1, 0);
+  auto result_bos = tokenizer_->encode(text, 1, 0);
   ASSERT_TRUE(result_bos.ok());
   EXPECT_EQ(result_bos.get(), tokens_base)
       << "encode(text, 1, 0) differs from encode(text, 0, 0) without post-processor";
 
-  auto result_eos = tokenizer_.encode(text, 0, 1);
+  auto result_eos = tokenizer_->encode(text, 0, 1);
   ASSERT_TRUE(result_eos.ok());
   EXPECT_EQ(result_eos.get(), tokens_base)
       << "encode(text, 0, 1) differs from encode(text, 0, 0) without post-processor";
 
-  auto result_both = tokenizer_.encode(text, 1, 1);
+  auto result_both = tokenizer_->encode(text, 1, 1);
   ASSERT_TRUE(result_both.ok());
   EXPECT_EQ(result_both.get(), tokens_base)
       << "encode(text, 1, 1) differs from encode(text, 0, 0) without post-processor";
@@ -361,17 +376,16 @@ TEST_P(CustomHFTokenizerTest, BosEosDoesNotAffectLengthWithoutPostProcessor) {
 TEST_P(CustomHFTokenizerTest, EncodeDecodeWithBosEosSkip) {
   std::string text = "Hello world";
 
-  auto encode_result = tokenizer_.encode(text, 1, 1);
+  auto encode_result = tokenizer_->encode(text, 1, 1);
   ASSERT_TRUE(encode_result.ok());
   auto tokens = encode_result.get();
 
-  auto decode_with_special = tokenizer_.decode(tokens, false);
+  auto decode_with_special = tokenizer_->decode(tokens, false);
   ASSERT_TRUE(decode_with_special.ok());
 
-  auto decode_skip_special = tokenizer_.decode(tokens, true);
+  auto decode_skip_special = tokenizer_->decode(tokens, true);
   ASSERT_TRUE(decode_skip_special.ok());
 
-  // skip_special_tokens=true can only shorten or equal, never lengthen
   EXPECT_GE(decode_with_special.get().size(), decode_skip_special.get().size())
       << "skip_special_tokens=true produced longer text than false for "
       << model_name_;
@@ -397,7 +411,6 @@ class BielikSpecificTest : public ::testing::Test {
     ASSERT_EQ(error, Error::Ok) << "Failed to load Bielik tokenizer";
   }
 
-  // Bielik has a Prepend("▁") normalizer: decode(encode(x)) == " " + x
   void assert_round_trip(const std::string& text) {
     auto encode_result = tokenizer_.encode(text, 0, 0);
     ASSERT_TRUE(encode_result.ok()) << "Encoding failed: \"" << text << "\"";
@@ -470,13 +483,13 @@ TEST_P(CustomHFTokenizerTest, VeryLongString) {
     long_text += "This is sentence number " + std::to_string(i) + ". ";
   }
 
-  auto encode_result = tokenizer_.encode(long_text, 0, 0);
+  auto encode_result = tokenizer_->encode(long_text, 0, 0);
   ASSERT_TRUE(encode_result.ok()) << "Failed to encode very long string";
 
   auto tokens = encode_result.get();
   EXPECT_GT(tokens.size(), 100) << "Suspiciously few tokens for long string";
 
-  auto decode_result = tokenizer_.decode(tokens);
+  auto decode_result = tokenizer_->decode(tokens);
   ASSERT_TRUE(decode_result.ok()) << "Failed to decode very long string";
 
   std::string decoded = decode_result.get();
@@ -491,7 +504,7 @@ TEST_P(CustomHFTokenizerTest, VeryLongString) {
           << model_name_;
       break;
     case NormalizerBehavior::LossyIdempotent: {
-      auto second_encode = tokenizer_.encode(decoded, 0, 0);
+      auto second_encode = tokenizer_->encode(decoded, 0, 0);
       ASSERT_TRUE(second_encode.ok());
       EXPECT_EQ(second_encode.get(), tokens)
           << "Token sequences differ on second encode for very long string in "
@@ -519,8 +532,6 @@ TEST_P(CustomHFTokenizerTest, MixedAlphanumeric) {
 }
 
 TEST_P(CustomHFTokenizerTest, EncodeDecodeIdempotent) {
-  // Prepend normalizer adds a space each round-trip, so idempotency doesn't
-  // hold for it; tested separately via PrependSpace check.
   if (normalizer_ == NormalizerBehavior::PrependSpace) {
     GTEST_SKIP()
         << "Skipping idempotency test for Prepend normalizer (tested via PrependSpace check)";
@@ -533,11 +544,11 @@ TEST_P(CustomHFTokenizerTest, EncodeDecodeIdempotent) {
       "new\nline\tand\ttabs"};
 
   for (const auto& original : test_texts) {
-    auto encode_result = tokenizer_.encode(original, 0, 0);
+    auto encode_result = tokenizer_->encode(original, 0, 0);
     ASSERT_TRUE(encode_result.ok());
     auto tokens = encode_result.get();
 
-    auto decode_result = tokenizer_.decode(tokens);
+    auto decode_result = tokenizer_->decode(tokens);
     ASSERT_TRUE(decode_result.ok());
     std::string decoded = decode_result.get();
 
@@ -545,7 +556,7 @@ TEST_P(CustomHFTokenizerTest, EncodeDecodeIdempotent) {
       continue;
     }
 
-    auto second_encode = tokenizer_.encode(decoded, 0, 0);
+    auto second_encode = tokenizer_->encode(decoded, 0, 0);
     ASSERT_TRUE(second_encode.ok());
     auto second_tokens = second_encode.get();
 

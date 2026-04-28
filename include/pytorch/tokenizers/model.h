@@ -10,6 +10,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -35,7 +36,7 @@ namespace tokenizers {
  */
 class Model {
  public:
-  using Ptr = std::shared_ptr<Model>;
+  using Ptr = std::unique_ptr<Model>;
 
   virtual ~Model() = default;
 
@@ -108,6 +109,15 @@ class Model {
   }
 };
 
+// -- Shared types -------------------------------------------------------------
+
+/// Resolved BOS/EOS/UNK token IDs, produced by resolve_sequence_tokens().
+struct SequenceTokenIds {
+  std::optional<uint64_t> unk_token_id;
+  std::optional<uint64_t> bos_token_id;
+  std::optional<uint64_t> eos_token_id;
+};
+
 // -- Factory ------------------------------------------------------------------
 
 // Helper macro to standardize addition of config member fields
@@ -165,6 +175,27 @@ class ModelConfig {
    * Construct the model instance from the member data
    */
   Model::Ptr create() const;
+
+ private:
+  // Per-type factory helpers called by create().
+  Model::Ptr create_bpe(
+      detail::TokenMap token_map,
+      detail::TokenMap special_token_map,
+      std::unique_ptr<IRegex> regex,
+      const struct SequenceTokenIds& ids) const;
+  Model::Ptr create_wordpiece(
+      detail::TokenMap token_map,
+      detail::TokenMap special_token_map,
+      const struct SequenceTokenIds& ids) const;
+  Model::Ptr create_unigram(
+      detail::TokenMap special_token_map,
+      std::unique_ptr<IRegex> regex,
+      const struct SequenceTokenIds& ids) const;
+  Model::Ptr create_wordlevel(
+      detail::TokenMap token_map,
+      detail::TokenMap special_token_map,
+      std::unique_ptr<IRegex> regex,
+      const struct SequenceTokenIds& ids) const;
 };
 
 } // namespace tokenizers

@@ -8,22 +8,25 @@
 // @lint-ignore-every CLANGTIDY facebook-hte-RelativeInclude
 #include <pytorch/tokenizers/llama2c_tokenizer.h>
 #include <cstring>
+#include <memory>
 
 namespace tokenizers {
 
 static int compare_tokens(const void* a, const void* b) {
-  if (((TokenIndex*)a)->str == nullptr) {
+  if (static_cast<const TokenIndex*>(a)->str == nullptr) {
     return -1;
   }
-  if (((TokenIndex*)b)->str == nullptr) {
+  if (static_cast<const TokenIndex*>(b)->str == nullptr) {
     return 1;
   }
-  return strcmp(((TokenIndex*)a)->str, ((TokenIndex*)b)->str);
+  return strcmp(
+      static_cast<const TokenIndex*>(a)->str,
+      static_cast<const TokenIndex*>(b)->str);
 }
 
 Llama2cTokenizer::Llama2cTokenizer() : Tokenizer() {
   for (int i = 0; i < 256; i++) {
-    byte_pieces_[i * 2] = (unsigned char)i;
+    byte_pieces_[i * 2] = static_cast<unsigned char>(i);
     byte_pieces_[i * 2 + 1] = '\0';
   }
 }
@@ -146,7 +149,7 @@ Result<std::string> Llama2cTokenizer::decode(
   // parse this and convert and return the actual byte
   unsigned char byte_val;
   if (sscanf(piece, "<0x%02hhX>", &byte_val) == 1) {
-    piece = (char*)byte_pieces_ + byte_val * 2;
+    piece = reinterpret_cast<const char*>(byte_pieces_) + byte_val * 2;
   }
   std::string res(piece);
   return res;
@@ -159,8 +162,8 @@ str_lookup(const char* str, TokenIndex* sorted_vocab, int32_t vocab_size) {
   TokenIndex tok;
   tok.str = str;
   tok.id = 0;
-  TokenIndex* res = (TokenIndex*)bsearch(
-      &tok, sorted_vocab, vocab_size, sizeof(TokenIndex), compare_tokens);
+  TokenIndex* res = static_cast<TokenIndex*>(bsearch(
+      &tok, sorted_vocab, vocab_size, sizeof(TokenIndex), compare_tokens));
   return res != nullptr ? res->id : -1;
 }
 
@@ -207,7 +210,7 @@ Result<std::vector<uint64_t>> Llama2cTokenizer::encode(
   // create a temporary buffer that will store merge candidates of always two
   // consecutive tokens *2 for concat, +1 for null terminator +2 for UTF8 (in
   // case max_token_length is 1)
-  char* str_buffer = new char[max_token_length_ * 2 + 1 + 2];
+  auto str_buffer = std::make_unique<char[]>(max_token_length_ * 2 + 1 + 2);
   size_t str_len = 0;
 
   // start at 0 tokens
@@ -269,7 +272,7 @@ Result<std::vector<uint64_t>> Llama2cTokenizer::encode(
     }
 
     // ok c+1 is not a continuation byte, so we've read in a full codepoint
-    int id = str_lookup(str_buffer, sorted_vocab_.get(), vocab_size_);
+    int id = str_lookup(str_buffer.get(), sorted_vocab_.get(), vocab_size_);
     if (id != -1) {
       // we found this codepoint in vocab, add it as a token
       tokens.push_back(id);
@@ -277,8 +280,8 @@ Result<std::vector<uint64_t>> Llama2cTokenizer::encode(
       // byte_fallback encoding: just encode each byte as a token
       // +3 is here because the first 3 vocab elements are <unk>, <s>, </s>
       // so the individual bytes only start at index 3
-      for (int i = 0; i < str_len; i++) {
-        tokens.push_back((unsigned char)str_buffer[i] + 3);
+      for (size_t i = 0; i < str_len; i++) {
+        tokens.push_back(static_cast<unsigned char>(str_buffer[i]) + 3);
       }
     }
     str_len = 0; // protect against a sequence of stray UTF8 continuation bytes
@@ -294,12 +297,12 @@ Result<std::vector<uint64_t>> Llama2cTokenizer::encode(
     for (int i = 0; i < tokens.size() - 1; i++) {
       // check if we can merge the pair (tokens[i], tokens[i+1])
       snprintf(
-          str_buffer,
+          str_buffer.get(),
           max_token_length_ * 2 + 3,
           "%s%s",
           vocab_[tokens[i]],
           vocab_[tokens[i + 1]]);
-      int id = str_lookup(str_buffer, sorted_vocab_.get(), vocab_size_);
+      int id = str_lookup(str_buffer.get(), sorted_vocab_.get(), vocab_size_);
       if (id != -1 && vocab_scores_[id] > best_score) {
         // this merge pair exists in vocab! record its score and position
         best_score = vocab_scores_[id];
@@ -331,7 +334,6 @@ Result<std::vector<uint64_t>> Llama2cTokenizer::encode(
     return Error::EncodeFailure;
   }
 
-  delete[] str_buffer;
   return Result(tokens);
 }
 

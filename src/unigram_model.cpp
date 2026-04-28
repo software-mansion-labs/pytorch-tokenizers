@@ -10,8 +10,6 @@
 #include <pytorch/tokenizers/unigram_model.h>
 
 #include <algorithm>
-#include <cinttypes>
-#include <cmath>
 #include <cstdio>
 #include <limits>
 
@@ -333,20 +331,8 @@ std::pair<std::optional<std::string>, std::string>
 UnigramModel::split_with_allowed_special_token(
     const std::string& input,
     size_t offset) const {
-  if (!special_token_regex_) {
-    return {std::nullopt, input.substr(offset)};
-  }
-
-  auto matches = special_token_regex_->find_all(input.substr(offset));
-
-  for (const auto& m : matches) {
-    std::string matched_text = input.substr(offset + m.start, m.end - m.start);
-    if (special_token_map_.tryGetInteger(matched_text).has_value()) {
-      return {matched_text, input.substr(offset, m.start)};
-    }
-  }
-
-  return {std::nullopt, input.substr(offset)};
+  return detail::split_with_special_token(
+      special_token_regex_.get(), special_token_map_, input, offset);
 }
 
 } // namespace tokenizers

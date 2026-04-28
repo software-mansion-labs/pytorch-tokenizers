@@ -9,8 +9,6 @@
 
 #include <pytorch/tokenizers/bpe_model.h>
 
-#include <algorithm>
-#include <cinttypes>
 #include <limits>
 
 #include <pytorch/tokenizers/log.h>
@@ -46,8 +44,10 @@ struct HFWord {
         auto second_token = token_map.tryGetString(tokens[i + 1]);
 
         if (first_token && second_token) {
-          std::string merged_token =
-              std::string(*first_token) + std::string(*second_token);
+          std::string merged_token;
+          merged_token.reserve(first_token->size() + second_token->size());
+          merged_token += *first_token;
+          merged_token += *second_token;
           auto rank = merge_ranks.tryGetInteger(merged_token);
 
           if (rank && (!best_merge || *rank < best_merge->second)) {
@@ -68,8 +68,10 @@ struct HFWord {
       auto second_token = token_map.tryGetString(tokens[merge_idx + 1]);
 
       if (first_token && second_token) {
-        std::string merged_token =
-            std::string(*first_token) + std::string(*second_token);
+        std::string merged_token;
+        merged_token.reserve(first_token->size() + second_token->size());
+        merged_token += *first_token;
+        merged_token += *second_token;
         auto merged_id = token_map.tryGetInteger(merged_token);
 
         if (merged_id) {
@@ -203,20 +205,8 @@ std::pair<std::optional<std::string>, std::string>
 BPEModel::split_with_allowed_special_token(
     const std::string& input,
     size_t offset) const {
-  if (!special_token_regex_) {
-    return std::make_pair(std::nullopt, input.substr(offset));
-  }
-
-  auto matches = special_token_regex_->find_all(input.substr(offset));
-
-  for (const auto& m : matches) {
-    std::string matched_text = input.substr(offset + m.start, m.end - m.start);
-    if (special_token_map_.tryGetInteger(matched_text).has_value()) {
-      return {matched_text, input.substr(offset, m.start)};
-    }
-  }
-
-  return {std::nullopt, input.substr(offset)};
+  return detail::split_with_special_token(
+      special_token_regex_.get(), special_token_map_, input, offset);
 }
 
 Result<std::vector<uint64_t>> BPEModel::byte_pair_encode(

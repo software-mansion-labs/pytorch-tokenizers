@@ -31,7 +31,9 @@ class WordPieceModel : public Model {
       size_t max_input_chars_per_word,
       std::optional<uint64_t> unk_token_id,
       std::optional<uint64_t> bos_token_id,
-      std::optional<uint64_t> eos_token_id);
+      std::optional<uint64_t> eos_token_id,
+      std::unordered_set<std::string> rstrip_tokens = {},
+      std::unordered_set<std::string> lstrip_tokens = {});
 
   ~WordPieceModel() override = default;
 
@@ -63,6 +65,13 @@ class WordPieceModel : public Model {
     return eos_token_id_.value_or(0);
   }
 
+  bool special_token_has_rstrip(const std::string& token) const override {
+    return rstrip_tokens_.count(token) > 0;
+  }
+  bool special_token_has_lstrip(const std::string& token) const override {
+    return lstrip_tokens_.count(token) > 0;
+  }
+
  private:
   detail::TokenMap token_map_;
   detail::TokenMap special_token_map_;
@@ -75,6 +84,9 @@ class WordPieceModel : public Model {
   std::optional<uint64_t> unk_token_id_;
   std::optional<uint64_t> bos_token_id_;
   std::optional<uint64_t> eos_token_id_;
+
+  std::unordered_set<std::string> rstrip_tokens_;
+  std::unordered_set<std::string> lstrip_tokens_;
 
   bool initialized_ = false;
   int32_t vocab_size_ = 0;

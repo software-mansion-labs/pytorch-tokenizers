@@ -98,9 +98,10 @@ TEST_F(ByteLevelPreTokenizerTest, PreTokenizeCustomRegex) {
 class SequencePreTokenizerTest : public ::testing::Test {};
 
 TEST_F(SequencePreTokenizerTest, PreTokenizeDigitAndByteLevel) {
-  PreTokenizer::Ptr dptok(new DigitsPreTokenizer(true));
-  PreTokenizer::Ptr bptok(new ByteLevelPreTokenizer(false));
-  SequencePreTokenizer ptok({dptok, bptok});
+  std::vector<PreTokenizer::Ptr> ptoks;
+  ptoks.push_back(std::make_unique<DigitsPreTokenizer>(true));
+  ptoks.push_back(std::make_unique<ByteLevelPreTokenizer>(false));
+  SequencePreTokenizer ptok(std::move(ptoks));
   assert_split_match(
       ptok,
       "The number 1 then 234 then 5.",

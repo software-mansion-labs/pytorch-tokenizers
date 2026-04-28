@@ -9,10 +9,10 @@
 
 // Local
 #include <pytorch/tokenizers/pre_tokenizer.h>
+#include <pytorch/tokenizers/unicode_utils.h>
 #include <unicode.h>
 
 // Standard
-#include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <memory>
@@ -56,15 +56,15 @@ PreTokenizer::Ptr PreTokenizerConfig::create() const {
     // all real tokenizer.json files with Regex+invert=false use behavior=
     // Isolated which works correctly in non-delimiter mode too.
 
-    return std::make_shared<RegexPreTokenizer>(
+    return std::make_unique<RegexPreTokenizer>(
         *pattern, delimiter_flag, behavior_str);
   }
   if (type == "Digits") {
-    return std::make_shared<DigitsPreTokenizer>(
+    return std::make_unique<DigitsPreTokenizer>(
         individual_digits.value_or(false));
   }
   if (type == "ByteLevel") {
-    return std::make_shared<ByteLevelPreTokenizer>(
+    return std::make_unique<ByteLevelPreTokenizer>(
         add_prefix_space.value_or(true),
         pattern.value_or(""),
         use_regex.value_or(true));
@@ -78,10 +78,10 @@ PreTokenizer::Ptr PreTokenizerConfig::create() const {
     for (const auto& cfg : *pretokenizers) {
       pretoks.push_back(cfg.create());
     }
-    return std::make_shared<SequencePreTokenizer>(pretoks);
+    return std::make_unique<SequencePreTokenizer>(std::move(pretoks));
   }
   if (type == "BertPreTokenizer") {
-    return std::make_shared<BertPreTokenizer>();
+    return std::make_unique<BertPreTokenizer>();
   }
   if (type == "Metaspace") {
     auto rep = replacement.value_or("\xe2\x96\x81"); // ▁
@@ -96,16 +96,16 @@ PreTokenizer::Ptr PreTokenizerConfig::create() const {
     } else {
       scheme = MetaspacePreTokenizer::PrependScheme::Always;
     }
-    return std::make_shared<MetaspacePreTokenizer>(rep, scheme, do_split);
+    return std::make_unique<MetaspacePreTokenizer>(rep, scheme, do_split);
   }
   if (type == "Whitespace") {
-    return std::make_shared<WhitespacePreTokenizer>();
+    return std::make_unique<WhitespacePreTokenizer>();
   }
   if (type == "WhitespaceSplit") {
-    return std::make_shared<WhitespaceSplitPreTokenizer>();
+    return std::make_unique<WhitespaceSplitPreTokenizer>();
   }
   if (type == "Punctuation") {
-    return std::make_shared<PunctuationPreTokenizer>(
+    return std::make_unique<PunctuationPreTokenizer>(
         behavior.value_or("Isolated"));
   }
   if (type == "CharDelimiterSplit") {
@@ -113,13 +113,13 @@ PreTokenizer::Ptr PreTokenizerConfig::create() const {
       throw std::runtime_error(
           "Missing delimiter for PreTokenizer of type CharDelimiterSplit");
     }
-    return std::make_shared<CharDelimiterSplitPreTokenizer>(*delimiter);
+    return std::make_unique<CharDelimiterSplitPreTokenizer>(*delimiter);
   }
   if (type == "UnicodeScripts") {
-    return std::make_shared<UnicodeScriptsPreTokenizer>();
+    return std::make_unique<UnicodeScriptsPreTokenizer>();
   }
   if (type == "FixedLength") {
-    return std::make_shared<FixedLengthPreTokenizer>(length.value_or(5));
+    return std::make_unique<FixedLengthPreTokenizer>(length.value_or(5));
   }
   throw std::runtime_error("Unsupported PreTokenizer type: " + type);
 }
@@ -417,22 +417,6 @@ std::vector<std::string> SequencePreTokenizer::pre_tokenize(
 // BertPreTokenizer
 // =============================================================================
 
-namespace {
-bool is_bert_punc(uint32_t cp) {
-  if ((cp >= 33 && cp <= 47) || (cp >= 58 && cp <= 64) ||
-      (cp >= 91 && cp <= 96) || (cp >= 123 && cp <= 126)) {
-    return true;
-  }
-  return unicode_cpt_flags(cp).is_punctuation;
-}
-
-bool is_cjk(uint32_t c) {
-  return (c >= 0x4E00 && c <= 0x9FFF) || (c >= 0x3400 && c <= 0x4DBF) ||
-      (c >= 0x20000 && c <= 0x2A6DF) || (c >= 0x2A700 && c <= 0x2B73F) ||
-      (c >= 0x2B740 && c <= 0x2B81F) || (c >= 0x2B920 && c <= 0x2CEAF) ||
-      (c >= 0xF900 && c <= 0xFAFF) || (c >= 0x2F800 && c <= 0x2FA1F);
-}
-} // namespace
 
 std::vector<std::string> BertPreTokenizer::pre_tokenize(
     const std::string& input) const {
@@ -461,7 +445,7 @@ std::vector<std::string> BertPreTokenizer::pre_tokenize(
     std::vector<uint32_t> word_cpts = unicode_cpts_from_utf8(word);
     std::string current_token;
     for (uint32_t cp : word_cpts) {
-      if (is_bert_punc(cp) || is_cjk(cp)) {
+      if (unicode_utils::is_punctuation(cp) || unicode_utils::is_cjk(cp)) {
         if (!current_token.empty()) {
           final_tokens.push_back(std::move(current_token));
           current_token.clear();
@@ -565,16 +549,6 @@ std::vector<std::string> WhitespaceSplitPreTokenizer::pre_tokenize(
 // PunctuationPreTokenizer
 // =============================================================================
 
-namespace {
-bool is_unicode_punctuation(uint32_t cp) {
-  // ASCII punctuation
-  if ((cp >= 33 && cp <= 47) || (cp >= 58 && cp <= 64) ||
-      (cp >= 91 && cp <= 96) || (cp >= 123 && cp <= 126)) {
-    return true;
-  }
-  return unicode_cpt_flags(cp).is_punctuation;
-}
-} // namespace
 
 std::vector<std::string> PunctuationPreTokenizer::pre_tokenize(
     const std::string& input) const {
@@ -585,7 +559,7 @@ std::vector<std::string> PunctuationPreTokenizer::pre_tokenize(
 
   for (size_t i = 0; i < cpts.size(); ++i) {
     uint32_t cp = cpts[i];
-    bool punc = is_unicode_punctuation(cp);
+    bool punc = unicode_utils::is_punctuation(cp);
 
     if (i == 0) {
       current_is_punc = punc;
@@ -815,7 +789,7 @@ UScript get_script(uint32_t cp) {
   // CJK prolonged sound mark → Han
   if (cp == 0x30FC) return UScript::Han;
   // CJK
-  if (is_cjk(cp)) return UScript::Han;
+  if (unicode_utils::is_cjk(cp)) return UScript::Han;
   // CJK Symbols and Punctuation
   if (cp >= 0x3000 && cp <= 0x303F) return UScript::Han;
 

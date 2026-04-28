@@ -69,17 +69,20 @@ TEST(PostProcessorTest, SequenceProcessing) {
       Piece::SpecialToken("[CLS]", 0), Piece::Sequence(SequenceId::A, 0)};
   std::map<std::string, SpecialToken> st1;
   st1["[CLS]"] = {"[CLS]", {101}, {"[CLS]"}};
-  auto p1 = std::make_shared<TemplateProcessing>(t1, Template{}, st1);
+  auto p1 = std::make_unique<TemplateProcessing>(t1, Template{}, st1);
 
   // Processor 2: Append 102
   Template t2 = {
       Piece::Sequence(SequenceId::A, 0), Piece::SpecialToken("[SEP]", 0)};
   std::map<std::string, SpecialToken> st2;
   st2["[SEP]"] = {"[SEP]", {102}, {"[SEP]"}};
-  auto p2 = std::make_shared<TemplateProcessing>(t2, Template{}, st2);
+  auto p2 = std::make_unique<TemplateProcessing>(t2, Template{}, st2);
 
+  std::vector<PostProcessor::Ptr> processors;
+  processors.push_back(std::move(p1));
+  processors.push_back(std::move(p2));
   auto seq_processor =
-      std::make_shared<Sequence>(std::vector<PostProcessor::Ptr>{p1, p2});
+      std::make_unique<Sequence>(std::move(processors));
 
   std::vector<uint64_t> input = {5, 6};
   // p1 -> {101, 5, 6}
@@ -154,17 +157,20 @@ TEST(PostProcessorTest, NestedSequenceProcessing) {
       Piece::SpecialToken("[CLS]", 0), Piece::Sequence(SequenceId::A, 0)};
   std::map<std::string, SpecialToken> st1;
   st1["[CLS]"] = {"[CLS]", {101}, {"[CLS]"}};
-  auto p1 = std::make_shared<TemplateProcessing>(t1, Template{}, st1);
+  auto p1 = std::make_unique<TemplateProcessing>(t1, Template{}, st1);
 
   // p2: [$0, 102]
   Template t2 = {
       Piece::Sequence(SequenceId::A, 0), Piece::SpecialToken("[SEP]", 0)};
   std::map<std::string, SpecialToken> st2;
   st2["[SEP]"] = {"[SEP]", {102}, {"[SEP]"}};
-  auto p2 = std::make_shared<TemplateProcessing>(t2, Template{}, st2);
+  auto p2 = std::make_unique<TemplateProcessing>(t2, Template{}, st2);
 
+  std::vector<PostProcessor::Ptr> inner_processors;
+  inner_processors.push_back(std::move(p1));
+  inner_processors.push_back(std::move(p2));
   auto inner_seq =
-      std::make_shared<Sequence>(std::vector<PostProcessor::Ptr>{p1, p2});
+      std::make_unique<Sequence>(std::move(inner_processors));
 
   // p3: [200, $0, 201]
   Template t3 = {
@@ -174,10 +180,12 @@ TEST(PostProcessorTest, NestedSequenceProcessing) {
   std::map<std::string, SpecialToken> st3;
   st3["200"] = {"200", {200}, {"200"}};
   st3["201"] = {"201", {201}, {"201"}};
-  auto p3 = std::make_shared<TemplateProcessing>(t3, Template{}, st3);
+  auto p3 = std::make_unique<TemplateProcessing>(t3, Template{}, st3);
 
-  auto outer_seq = std::make_shared<Sequence>(
-      std::vector<PostProcessor::Ptr>{inner_seq, p3});
+  std::vector<PostProcessor::Ptr> outer_processors;
+  outer_processors.push_back(std::move(inner_seq));
+  outer_processors.push_back(std::move(p3));
+  auto outer_seq = std::make_unique<Sequence>(std::move(outer_processors));
 
   std::vector<uint64_t> input = {5};
   // inner_seq(input) -> {101, 5, 102}

@@ -128,10 +128,19 @@ runtime.cxx_library(
 runtime.cxx_library(
     name = "hf_tokenizer",
     srcs = [
+        "src/bpe_model.cpp",
         "src/hf_tokenizer.cpp",
+        "src/model.cpp",
         "src/normalizer.cpp",
+        "src/padding.cpp",
+        "src/post_processor.cpp",
         "src/pre_tokenizer.cpp",
         "src/token_decoder.cpp",
+        "src/truncation.cpp",
+        "src/unicode-nfc.cpp",
+        "src/unigram_model.cpp",
+        "src/wordlevel_model.cpp",
+        "src/wordpiece_model.cpp",
     ],
     platforms = PLATFORMS,
     visibility = [

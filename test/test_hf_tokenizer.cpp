@@ -10,11 +10,18 @@
 #include <gtest/gtest.h>
 #include <pytorch/tokenizers/hf_tokenizer.h>
 
+#include <atomic>
+#include <filesystem>
 #include <fstream>
+
+#include <unistd.h>
 
 namespace tokenizers {
 
 namespace {
+
+static std::atomic<int> temp_file_counter{0};
+
 static inline std::string _get_resource_path(const std::string& name) {
   return std::getenv("RESOURCES_PATH") + std::string("/") + name;
 }
@@ -23,8 +30,11 @@ static inline std::string _get_resource_path(const std::string& name) {
 class TempFile {
  public:
   TempFile(const std::string& content) {
-    path_ = std::tmpnam(nullptr);
-    path_ += ".json";
+    auto tmp_dir = std::filesystem::temp_directory_path();
+    path_ = (tmp_dir / ("tokenizer_test_" +
+                         std::to_string(getpid()) + "_" +
+                         std::to_string(temp_file_counter++) + ".json"))
+                .string();
     std::ofstream f(path_);
     f << content;
   }

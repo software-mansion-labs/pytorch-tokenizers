@@ -189,5 +189,29 @@ inline Result<std::unique_ptr<IRegex>> build_special_token_regex(
   return create_regex("(" + special_pattern + ")");
 }
 
+/// Shared implementation: split input around the first regex-matched token
+/// that exists in the token map. Used by all Model implementations.
+inline std::pair<std::optional<std::string>, std::string>
+split_with_special_token(
+    const IRegex* regex,
+    const TokenMap& token_map,
+    const std::string& input,
+    size_t offset) {
+  if (!regex) {
+    return {std::nullopt, input.substr(offset)};
+  }
+
+  auto matches = regex->find_all(input.substr(offset));
+
+  for (const auto& m : matches) {
+    std::string matched_text = input.substr(offset + m.start, m.end - m.start);
+    if (token_map.tryGetInteger(matched_text).has_value()) {
+      return {matched_text, input.substr(offset, m.start)};
+    }
+  }
+
+  return {std::nullopt, input.substr(offset)};
+}
+
 } // namespace detail
 } // namespace tokenizers

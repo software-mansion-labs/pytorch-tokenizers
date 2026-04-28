@@ -44,8 +44,7 @@ struct PaddingParams {
 
 class Padding {
  public:
-  /** Shared pointer type */
-  typedef std::shared_ptr<Padding> Ptr;
+  using Ptr = std::unique_ptr<Padding>;
 
   /**
    * @param params: The padding parameters
