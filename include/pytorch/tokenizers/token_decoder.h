@@ -10,7 +10,6 @@
 #pragma once
 
 // Standard
-#include <algorithm>
 #include <memory>
 #include <optional>
 #include <string>
@@ -31,8 +30,7 @@ class TokenDecoder {
  public:
   /* -- Types -- */
 
-  /** Shared pointer type */
-  typedef std::shared_ptr<TokenDecoder> Ptr;
+  using Ptr = std::unique_ptr<TokenDecoder>;
 
   /* -- Virtual Methods -- */
 

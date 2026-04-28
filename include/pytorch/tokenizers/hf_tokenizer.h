@@ -79,21 +79,27 @@ class HFTokenizer : public Tokenizer {
       const std::string& model_config_path,
       const std::string& special_tokens_map_path);
 
-  Normalizer::Ptr _normalizer;
-  PreTokenizer::Ptr _pretokenizer;
-  PostProcessor::Ptr _postprocessor;
-  TokenDecoder::Ptr _decoder;
-  Truncation::Ptr _truncation;
-  Padding::Ptr _padding;
+  /// Split input around the first added_token match. Returns (matched token,
+  /// text before match). Uses _added_token_regex if available, otherwise
+  /// falls back to the model's special-only regex.
+  std::pair<std::optional<std::string>, std::string>
+  split_added_token(const std::string& input, size_t offset) const;
 
-  Model::Ptr _model;
+  Normalizer::Ptr normalizer_;
+  PreTokenizer::Ptr pretokenizer_;
+  PostProcessor::Ptr postprocessor_;
+  TokenDecoder::Ptr decoder_;
+  Truncation::Ptr truncation_;
+  Padding::Ptr padding_;
+
+  Model::Ptr model_;
 
   // Regex matching ALL added_tokens (both special and non-special).
   // HF matches every added_token as a never-split unit during encoding.
   // This is separate from the model's special_token_regex which only
   // contains special=true tokens (for standalone model.tokenize()).
-  std::unique_ptr<IRegex> _added_token_regex;
-  std::unique_ptr<detail::TokenMap> _added_token_map;
+  std::unique_ptr<IRegex> added_token_regex_;
+  std::unique_ptr<detail::TokenMap> added_token_map_;
 };
 
 } // namespace tokenizers

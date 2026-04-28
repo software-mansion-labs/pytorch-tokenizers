@@ -42,8 +42,7 @@ struct TruncationParams {
 
 class Truncation {
  public:
-  /** Shared pointer type */
-  typedef std::shared_ptr<Truncation> Ptr;
+  using Ptr = std::unique_ptr<Truncation>;
 
   /**
    * @param params: The truncation parameters

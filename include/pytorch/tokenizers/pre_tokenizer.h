@@ -28,7 +28,7 @@ namespace tokenizers {
 
 class PreTokenizer {
  public:
-  typedef std::shared_ptr<PreTokenizer> Ptr;
+  using Ptr = std::unique_ptr<PreTokenizer>;
 
   virtual std::vector<std::string> pre_tokenize(
       const std::string& input) const = 0;

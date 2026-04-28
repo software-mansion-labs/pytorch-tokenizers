@@ -565,10 +565,11 @@ TEST(DecoderAdversarialTest, WordPieceAllContinuations) {
 
 TEST(DecoderAdversarialTest, SequenceDecoderOrder) {
   // Replace ▁ with space, THEN fuse — order matters
-  auto replace = std::make_shared<ReplaceTokenDecoder>(
-      "\xe2\x96\x81", " ");
-  auto fuse = std::make_shared<FuseTokenDecoder>();
-  SequenceTokenDecoder decoder({replace, fuse});
+  std::vector<TokenDecoder::Ptr> decoders;
+  decoders.push_back(std::make_unique<ReplaceTokenDecoder>(
+      "\xe2\x96\x81", " "));
+  decoders.push_back(std::make_unique<FuseTokenDecoder>());
+  SequenceTokenDecoder decoder(std::move(decoders));
 
   auto result = decoder.decode(
       {"\xe2\x96\x81Hello", "\xe2\x96\x81world"});

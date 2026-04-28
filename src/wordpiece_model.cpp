@@ -25,7 +25,9 @@ WordPieceModel::WordPieceModel(
     size_t max_input_chars_per_word,
     std::optional<uint64_t> unk_token_id,
     std::optional<uint64_t> bos_token_id,
-    std::optional<uint64_t> eos_token_id)
+    std::optional<uint64_t> eos_token_id,
+    std::unordered_set<std::string> rstrip_tokens,
+    std::unordered_set<std::string> lstrip_tokens)
     : token_map_(std::move(token_map)),
       special_token_map_(std::move(special_token_map)),
       unk_token_(std::move(unk_token)),
@@ -33,7 +35,9 @@ WordPieceModel::WordPieceModel(
       max_input_chars_per_word_(max_input_chars_per_word),
       unk_token_id_(unk_token_id),
       bos_token_id_(bos_token_id),
-      eos_token_id_(eos_token_id) {
+      eos_token_id_(eos_token_id),
+      rstrip_tokens_(std::move(rstrip_tokens)),
+      lstrip_tokens_(std::move(lstrip_tokens)) {
   vocab_size_ = token_map_.size() + special_token_map_.size();
   auto special_token_regex_res =
       detail::build_special_token_regex(special_token_map_);
@@ -182,20 +186,8 @@ std::pair<std::optional<std::string>, std::string>
 WordPieceModel::split_with_allowed_special_token(
     const std::string& input,
     size_t offset) const {
-  if (!special_token_regex_) {
-    return {std::nullopt, input.substr(offset)};
-  }
-
-  auto matches = special_token_regex_->find_all(input.substr(offset));
-
-  for (const auto& m : matches) {
-    std::string matched_text = input.substr(offset + m.start, m.end - m.start);
-    if (special_token_map_.tryGetInteger(matched_text).has_value()) {
-      return {matched_text, input.substr(offset, m.start)};
-    }
-  }
-
-  return {std::nullopt, input.substr(offset)};
+  return detail::split_with_special_token(
+      special_token_regex_.get(), special_token_map_, input, offset);
 }
 
 } // namespace tokenizers

@@ -62,7 +62,7 @@ std::vector<uint32_t> Padding::generate_mask(
 }
 
 Padding::Ptr PaddingConfig::create() const {
-  return std::make_shared<Padding>(params);
+  return std::make_unique<Padding>(params);
 }
 
 PaddingConfig::PaddingConfig(std::string strategy) {

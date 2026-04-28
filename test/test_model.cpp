@@ -11,17 +11,27 @@
 #include <pytorch/tokenizers/bpe_model.h>
 #include <pytorch/tokenizers/model.h>
 
+#include <atomic>
+#include <filesystem>
 #include <fstream>
+
+#include <unistd.h>
 
 namespace tokenizers {
 
 namespace {
+
+static std::atomic<int> temp_file_counter{0};
+
 // Helper to create a temporary file with given content
 class TempFile {
  public:
   TempFile(const std::string& content) {
-    path_ = std::tmpnam(nullptr);
-    path_ += ".json";
+    auto tmp_dir = std::filesystem::temp_directory_path();
+    path_ = (tmp_dir / ("tokenizer_test_" +
+                         std::to_string(getpid()) + "_" +
+                         std::to_string(temp_file_counter++) + ".json"))
+                .string();
     std::ofstream f(path_);
     f << content;
   }

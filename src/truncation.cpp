@@ -9,7 +9,6 @@
 
 #include <pytorch/tokenizers/truncation.h>
 #include <pytorch/tokenizers/log.h>
-#include <algorithm>
 
 namespace tokenizers {
 
@@ -113,7 +112,7 @@ Truncation::truncate_pair(
 }
 
 Truncation::Ptr TruncationConfig::create() const {
-  return std::make_shared<Truncation>(params);
+  return std::make_unique<Truncation>(params);
 }
 
 TruncationConfig& TruncationConfig::parse_json(const nlohmann::json& json_config) {

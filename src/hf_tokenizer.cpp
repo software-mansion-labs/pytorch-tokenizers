@@ -94,39 +94,12 @@ HFTokenizer::encode(const std::string& input, int8_t bos, int8_t eos) const {
   size_t offset = 0;
 
   while (offset < input.size()) {
-    // Use HFTokenizer's own regex (all added_tokens) if available,
-    // otherwise fall back to the model's regex (special-only).
-    std::optional<std::string> special;
-    std::string sub_input;
-    if (_added_token_regex) {
-      // Find the first added_token match in the remaining input.
-      auto matches = _added_token_regex->find_all(input.substr(offset));
-      bool found = false;
-      for (const auto& m : matches) {
-        std::string matched =
-            input.substr(offset + m.start, m.end - m.start);
-        if (_added_token_map->tryGetInteger(matched).has_value() ||
-            _model->piece_to_id(matched).ok()) {
-          special = matched;
-          sub_input = input.substr(offset, m.start);
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
-        sub_input = input.substr(offset);
-      }
-    } else {
-      auto split_result =
-          _model->split_with_allowed_special_token(input, offset);
-      special = split_result.first;
-      sub_input = split_result.second;
-    }
+    auto [special, sub_input] = split_added_token(input, offset);
 
     // lstrip: preserve original size for offset advancement, strip trailing
     // spaces from sub_input so they aren't encoded before the special token
     const size_t original_sub_size = sub_input.size();
-    if (special && _model->special_token_has_lstrip(*special)) {
+    if (special && model_->special_token_has_lstrip(*special)) {
       while (!sub_input.empty() && sub_input.back() == ' ') {
         sub_input.pop_back();
       }
@@ -134,19 +107,19 @@ HFTokenizer::encode(const std::string& input, int8_t bos, int8_t eos) const {
 
     if (!sub_input.empty()) {
       std::string normalized_segment = sub_input;
-      if (_normalizer) {
-        normalized_segment = _normalizer->normalize(sub_input);
+      if (normalizer_) {
+        normalized_segment = normalizer_->normalize(sub_input);
       }
 
       std::vector<std::string> pieces;
-      if (_pretokenizer) {
-        pieces = _pretokenizer->pre_tokenize(normalized_segment);
+      if (pretokenizer_) {
+        pieces = pretokenizer_->pre_tokenize(normalized_segment);
       } else {
         pieces.push_back(normalized_segment);
       }
 
       for (const auto& piece : pieces) {
-        auto piece_tokens_result = _model->tokenize(piece);
+        auto piece_tokens_result = model_->tokenize(piece);
         if (!piece_tokens_result.ok()) {
           return piece_tokens_result.error();
         }
@@ -157,7 +130,7 @@ HFTokenizer::encode(const std::string& input, int8_t bos, int8_t eos) const {
     offset += original_sub_size;
 
     if (special) {
-      auto id_res = _model->piece_to_id(*special);
+      auto id_res = model_->piece_to_id(*special);
       if (!id_res.ok()) {
         return id_res.error();
       }
@@ -165,7 +138,7 @@ HFTokenizer::encode(const std::string& input, int8_t bos, int8_t eos) const {
       offset += special->size();
 
       // rstrip: skip leading spaces after this token
-      if (_model->special_token_has_rstrip(*special)) {
+      if (model_->special_token_has_rstrip(*special)) {
         while (offset < input.size() && input[offset] == ' ') {
           ++offset;
         }
@@ -178,25 +151,25 @@ HFTokenizer::encode(const std::string& input, int8_t bos, int8_t eos) const {
   bool add_special = (bos > 0 || eos > 0);
 
   // 4. Truncation
-  if (_truncation) {
+  if (truncation_) {
     size_t added = 0;
-    if (add_special && _postprocessor) {
-      added = _postprocessor->added_tokens(false); // is_pair=false
+    if (add_special && postprocessor_) {
+      added = postprocessor_->added_tokens(false); // is_pair=false
     }
-    tokens = _truncation->truncate(std::move(tokens), added);
+    tokens = truncation_->truncate(std::move(tokens), added);
   }
 
   // 5. Post-Processing
   // Special token insertion is exclusively the post-processor's responsibility,
   // matching Rust HuggingFace tokenizers behavior. No post-processor = no
   // special tokens added, regardless of add_special_tokens value.
-  if (_postprocessor) {
-    tokens = _postprocessor->process(tokens, add_special);
+  if (postprocessor_) {
+    tokens = postprocessor_->process(tokens, add_special);
   }
 
   // 6. Padding
-  if (_padding) {
-    tokens = _padding->pad(std::move(tokens));
+  if (padding_) {
+    tokens = padding_->pad(std::move(tokens));
   }
 
   return tokens;
@@ -206,14 +179,14 @@ Result<std::string> HFTokenizer::id_to_piece(uint64_t token) const {
   if (!initialized_) {
     return Error::Uninitialized;
   }
-  return _model->id_to_piece(token);
+  return model_->id_to_piece(token);
 }
 
 Result<uint64_t> HFTokenizer::piece_to_id(const std::string& text) const {
   if (!initialized_) {
     return Error::Uninitialized;
   }
-  return _model->piece_to_id(text);
+  return model_->piece_to_id(text);
 }
 
 Result<std::string> HFTokenizer::decode(
@@ -225,19 +198,19 @@ Result<std::string> HFTokenizer::decode(
     return Error::Uninitialized;
   }
 
-  if (skip_special_tokens && _model->is_special_token(token)) {
+  if (skip_special_tokens && model_->is_special_token(token)) {
     return std::string("");
   }
 
-  auto res = _model->id_to_piece(token);
+  auto res = model_->id_to_piece(token);
   if (!res.ok()) {
     return res.error();
   }
 
   std::string piece = *res;
   std::string ret;
-  if (_decoder) {
-    auto decoded = _decoder->decode({piece});
+  if (decoder_) {
+    auto decoded = decoder_->decode({piece});
     for (const auto& p : decoded) {
       ret += p;
     }
@@ -255,10 +228,10 @@ Result<std::string> HFTokenizer::decode(
   }
   std::vector<std::string> pieces;
   for (uint64_t token : tokens) {
-    if (skip_special_tokens && _model->is_special_token(token)) {
+    if (skip_special_tokens && model_->is_special_token(token)) {
       continue;
     }
-    auto res = _model->id_to_piece(token);
+    auto res = model_->id_to_piece(token);
     if (!res.ok()) {
       TK_LOG(Error, "unknown token: %" PRIu64 "\n", token);
       return Error::DecodeFailure;
@@ -266,8 +239,8 @@ Result<std::string> HFTokenizer::decode(
     pieces.push_back(*res);
   }
 
-  if (_decoder) {
-    pieces = _decoder->decode(pieces);
+  if (decoder_) {
+    pieces = decoder_->decode(pieces);
   }
 
   std::string result_str;
@@ -278,14 +251,32 @@ Result<std::string> HFTokenizer::decode(
   return result_str;
 }
 
-// -------------------------private method start--------------------------------
+// -------------------------private methods-------------------------------------
+
+std::pair<std::optional<std::string>, std::string>
+HFTokenizer::split_added_token(
+    const std::string& input,
+    size_t offset) const {
+  if (added_token_regex_) {
+    auto matches = added_token_regex_->find_all(input.substr(offset));
+    for (const auto& m : matches) {
+      std::string matched = input.substr(offset + m.start, m.end - m.start);
+      if (added_token_map_->tryGetInteger(matched).has_value() ||
+          model_->piece_to_id(matched).ok()) {
+        return {matched, input.substr(offset, m.start)};
+      }
+    }
+    return {std::nullopt, input.substr(offset)};
+  }
+  return model_->split_with_allowed_special_token(input, offset);
+}
 
 Error HFTokenizer::setup_normalizer(const json& parsed_json) {
   try {
     if (parsed_json.contains("normalizer") &&
         !parsed_json.at("normalizer").is_null()) {
       const auto& normalizer_json = parsed_json.at("normalizer");
-      _normalizer = NormalizerConfig().parse_json(normalizer_json).create();
+      normalizer_ = NormalizerConfig().parse_json(normalizer_json).create();
     }
   } catch (const std::exception& e) {
     TK_LOG(Error, "Failed to setup normalizer: %s", e.what());
@@ -299,7 +290,7 @@ Error HFTokenizer::setup_pretokenizer(const json& parsed_json) {
     if (parsed_json.contains("pre_tokenizer") &&
         !parsed_json.at("pre_tokenizer").is_null()) {
       const auto& pretokenizer_json = parsed_json.at("pre_tokenizer");
-      _pretokenizer =
+      pretokenizer_ =
           PreTokenizerConfig().parse_json(pretokenizer_json).create();
     }
   } catch (const std::exception& e) {
@@ -314,7 +305,7 @@ Error HFTokenizer::setup_postprocessor(const json& parsed_json) {
     if (parsed_json.contains("post_processor") &&
         !parsed_json.at("post_processor").is_null()) {
       const auto& post_processor_json = parsed_json.at("post_processor");
-      _postprocessor =
+      postprocessor_ =
           PostProcessorConfig().parse_json(post_processor_json).create();
     }
   } catch (const std::exception& e) {
@@ -328,7 +319,7 @@ Error HFTokenizer::setup_decoder(const json& parsed_json) {
   try {
     if (parsed_json.contains("decoder") &&
         !parsed_json.at("decoder").is_null()) {
-      _decoder =
+      decoder_ =
           TokenDecoderConfig().parse_json(parsed_json.at("decoder")).create();
     }
   } catch (const std::exception& e) {
@@ -343,7 +334,7 @@ Error HFTokenizer::setup_truncation(const json& parsed_json) {
     if (parsed_json.contains("truncation") &&
         !parsed_json.at("truncation").is_null()) {
       const auto& t_json = parsed_json.at("truncation");
-      _truncation = TruncationConfig().parse_json(t_json).create();
+      truncation_ = TruncationConfig().parse_json(t_json).create();
     }
   } catch (const std::exception& e) {
     TK_LOG(Error, "Failed to setup truncation: %s", e.what());
@@ -357,7 +348,7 @@ Error HFTokenizer::setup_padding(const json& parsed_json) {
     if (parsed_json.contains("padding") &&
         !parsed_json.at("padding").is_null()) {
       const auto& padding_json = parsed_json.at("padding");
-      _padding = PaddingConfig().parse_json(padding_json).create();
+      padding_ = PaddingConfig().parse_json(padding_json).create();
     }
   } catch (const std::exception& e) {
     TK_LOG(Error, "Failed to setup padding: %s", e.what());
@@ -375,15 +366,15 @@ Error HFTokenizer::setup_model(
   model_config.set_special_tokens_map_path(special_tokens_map_path);
   model_config.parse_json(parsed_json);
 
-  _model = model_config.create();
-  if (!_model) {
+  model_ =model_config.create();
+  if (!model_) {
     TK_LOG(Error, "Failed to create model");
     return Error::LoadFailure;
   }
 
-  vocab_size_ = _model->vocab_size();
-  bos_tok_ = _model->bos_token_id();
-  eos_tok_ = _model->eos_token_id();
+  vocab_size_ = model_->vocab_size();
+  bos_tok_ = model_->bos_token_id();
+  eos_tok_ = model_->eos_token_id();
 
   // Build regex from ALL added_tokens (both special and non-special).
   // HF matches every added_token as a never-split unit on the raw input
@@ -393,11 +384,11 @@ Error HFTokenizer::setup_model(
     auto map_res =
         detail::build_token_map(*model_config.all_added_token_pairs);
     if (map_res.ok()) {
-      _added_token_map =
+      added_token_map_ =
           std::make_unique<detail::TokenMap>(std::move(*map_res));
-      auto regex_res = detail::build_special_token_regex(*_added_token_map);
+      auto regex_res = detail::build_special_token_regex(*added_token_map_);
       if (regex_res.ok()) {
-        _added_token_regex = std::move(*regex_res);
+        added_token_regex_ = std::move(*regex_res);
       }
     }
   }

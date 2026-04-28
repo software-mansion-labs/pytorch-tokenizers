@@ -26,8 +26,7 @@ namespace tokenizers {
  */
 class PostProcessor {
  public:
-  /** Shared pointer type */
-  using Ptr = std::shared_ptr<PostProcessor>;
+  using Ptr = std::unique_ptr<PostProcessor>;
 
   virtual ~PostProcessor() = default;
 

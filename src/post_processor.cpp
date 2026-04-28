@@ -152,7 +152,7 @@ PostProcessorConfig::PostProcessorConfig(std::string type)
 
 PostProcessor::Ptr PostProcessorConfig::create() const {
   if (type == "TemplateProcessing") {
-    return std::make_shared<TemplateProcessing>(
+    return std::make_unique<TemplateProcessing>(
         single.value_or(Template()),
         pair.value_or(Template()),
         special_tokens.value_or(SpecialTokenMap()));
@@ -163,16 +163,16 @@ PostProcessor::Ptr PostProcessorConfig::create() const {
         ptrs.push_back(cfg.create());
       }
     }
-    return std::make_shared<Sequence>(std::move(ptrs));
+    return std::make_unique<Sequence>(std::move(ptrs));
   } else if (type == "ByteLevel") {
     // Return no-op sequence
-    return std::make_shared<Sequence>(std::vector<PostProcessor::Ptr>{});
+    return std::make_unique<Sequence>(std::vector<PostProcessor::Ptr>{});
   } else if (type == "BertProcessing") {
-    return std::make_shared<BertProcessing>(
+    return std::make_unique<BertProcessing>(
         sep.value_or(StringIdPair{"[SEP]", 102}),
         cls.value_or(StringIdPair{"[CLS]", 101}));
   } else if (type == "RobertaProcessing") {
-    return std::make_shared<RobertaProcessing>(
+    return std::make_unique<RobertaProcessing>(
         sep.value_or(StringIdPair{"</s>", 2}),
         cls.value_or(StringIdPair{"<s>", 0}),
         trim_offsets.value_or(true),

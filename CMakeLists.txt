@@ -75,7 +75,6 @@ add_subdirectory(
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ${_pic_flag})
 
-file(GLOB tokenizers_source_files ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 set(tokenizers_source_files
     ${CMAKE_CURRENT_SOURCE_DIR}/src/bpe_tokenizer_base.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/bpe_model.cpp

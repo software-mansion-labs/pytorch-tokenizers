@@ -12,6 +12,7 @@
 #include <pytorch/tokenizers/log.h>
 #include <pytorch/tokenizers/regex.h>
 #include <pytorch/tokenizers/unicode-nfc.h>
+#include <pytorch/tokenizers/unicode_utils.h>
 
 // Third Party
 #include <unicode.h>
@@ -20,7 +21,6 @@
 #include "third_party/darts_clone/darts.h"
 
 // Standard
-#include <algorithm>
 #include <cassert>
 #include <cstring>
 #include <iterator>
@@ -47,13 +47,13 @@ Normalizer::Ptr NormalizerConfig::create() const {
     if (!pattern || !content) {
       throw std::runtime_error("Missing pattern/content for Replace");
     }
-    return std::make_shared<ReplaceNormalizer>(*pattern, *content);
+    return std::make_unique<ReplaceNormalizer>(*pattern, *content);
   }
   if (type == "Prepend") {
     if (!prepend) {
       throw std::runtime_error("Missing prepend for Prepend");
     }
-    return std::make_shared<PrependNormalizer>(*prepend);
+    return std::make_unique<PrependNormalizer>(*prepend);
   }
   if (type == "Sequence") {
     if (!normalizers || normalizers->empty()) {
@@ -63,48 +63,48 @@ Normalizer::Ptr NormalizerConfig::create() const {
     for (const auto& cfg : *normalizers) {
       norms.push_back(cfg.create());
     }
-    return std::make_shared<SequenceNormalizer>(std::move(norms));
+    return std::make_unique<SequenceNormalizer>(std::move(norms));
   }
   if (type == "BertNormalizer") {
-    return std::make_shared<BertNormalizer>(
+    return std::make_unique<BertNormalizer>(
         clean_text.value_or(true),
         handle_chinese_chars.value_or(true),
         lowercase.value_or(true),
         strip_accents);
   }
   if (type == "NFC") {
-    return std::make_shared<NFCNormalizer>();
+    return std::make_unique<NFCNormalizer>();
   }
   if (type == "NFD") {
-    return std::make_shared<NFDNormalizer>();
+    return std::make_unique<NFDNormalizer>();
   }
   if (type == "NFKC") {
-    return std::make_shared<NFKCNormalizer>();
+    return std::make_unique<NFKCNormalizer>();
   }
   if (type == "NFKD") {
-    return std::make_shared<NFKDNormalizer>();
+    return std::make_unique<NFKDNormalizer>();
   }
   if (type == "Lowercase") {
-    return std::make_shared<LowercaseNormalizer>();
+    return std::make_unique<LowercaseNormalizer>();
   }
   if (type == "Strip") {
-    return std::make_shared<StripNormalizer>(
+    return std::make_unique<StripNormalizer>(
         strip_left.value_or(true), strip_right.value_or(true));
   }
   if (type == "StripAccents") {
-    return std::make_shared<StripAccentsNormalizer>();
+    return std::make_unique<StripAccentsNormalizer>();
   }
   if (type == "Nmt") {
-    return std::make_shared<NmtNormalizer>();
+    return std::make_unique<NmtNormalizer>();
   }
   if (type == "ByteLevel") {
-    return std::make_shared<ByteLevelNormalizer>();
+    return std::make_unique<ByteLevelNormalizer>();
   }
   if (type == "Precompiled") {
     if (!precompiled_charsmap || precompiled_charsmap->empty()) {
       throw std::runtime_error("Missing precompiled_charsmap for Precompiled");
     }
-    return std::make_shared<PrecompiledNormalizer>(*precompiled_charsmap);
+    return std::make_unique<PrecompiledNormalizer>(*precompiled_charsmap);
   }
   throw std::runtime_error("Unsupported Normalizer type: " + type);
 }
@@ -356,13 +356,6 @@ bool is_bert_control(uint32_t c) {
   return unicode_cpt_flags(c).is_control;
 }
 
-bool is_chinese_char(uint32_t c) {
-  return (c >= 0x4E00 && c <= 0x9FFF) || (c >= 0x3400 && c <= 0x4DBF) ||
-      (c >= 0x20000 && c <= 0x2A6DF) || (c >= 0x2A700 && c <= 0x2B73F) ||
-      (c >= 0x2B740 && c <= 0x2B81F) || (c >= 0x2B920 && c <= 0x2CEAF) ||
-      (c >= 0xF900 && c <= 0xFAFF) || (c >= 0x2F800 && c <= 0x2FA1F);
-}
-
 } // namespace
 
 std::string BertNormalizer::normalize(const std::string& input) const {
@@ -383,7 +376,7 @@ std::string BertNormalizer::normalize(const std::string& input) const {
     std::vector<uint32_t> handled;
     handled.reserve(cpts.size() * 3);
     for (uint32_t cp : cpts) {
-      if (is_chinese_char(cp)) {
+      if (unicode_utils::is_cjk(cp)) {
         handled.push_back(' ');
         handled.push_back(cp);
         handled.push_back(' ');

@@ -160,10 +160,10 @@ TEST(NormalizerTest, NormalizerConfigFromJsonRegex) {
 TEST(NormalizerTest, SequenceNormalizer) {
   // Test sequence of normalizers
   std::vector<Normalizer::Ptr> normalizers;
-  normalizers.push_back(std::make_shared<ReplaceNormalizer>(" ", "▁"));
-  normalizers.push_back(std::make_shared<ReplaceNormalizer>("a", "X"));
+  normalizers.push_back(std::make_unique<ReplaceNormalizer>(" ", "▁"));
+  normalizers.push_back(std::make_unique<ReplaceNormalizer>("a", "X"));
 
-  SequenceNormalizer seq_normalizer(normalizers);
+  SequenceNormalizer seq_normalizer(std::move(normalizers));
 
   std::string input = "banana split";
   std::string expected = "bXnXnX▁split";

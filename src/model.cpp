@@ -98,12 +98,7 @@ void parse_merges(ModelConfig& config, const nlohmann::json& model_json) {
   }
 }
 
-// Common setup for sequence tokens (BOS, EOS, UNK)
-struct SequenceTokenIds {
-  std::optional<uint64_t> unk_token_id;
-  std::optional<uint64_t> bos_token_id;
-  std::optional<uint64_t> eos_token_id;
-};
+} // anonymous namespace
 
 SequenceTokenIds resolve_sequence_tokens(
     const ModelConfig& config,
@@ -140,6 +135,7 @@ SequenceTokenIds resolve_sequence_tokens(
         }
       }
     } catch (...) {
+      TK_LOG(Info, "Failed to parse extra config file: %s", path.c_str());
     }
   };
 
@@ -199,8 +195,6 @@ SequenceTokenIds resolve_sequence_tokens(
 
   return ids;
 }
-
-} // namespace
 
 ModelConfig& ModelConfig::parse_json(const nlohmann::json& json_config) {
   if (json_config.contains("model") && !json_config.at("model").is_null()) {
@@ -343,129 +337,153 @@ Model::Ptr ModelConfig::create() const {
   // Resolve sequence tokens
   auto ids = resolve_sequence_tokens(*this, token_map, special_token_map);
 
+  // Build special token regex (only special=true tokens, for standalone
+  // model.tokenize()). HFTokenizer builds its own regex from ALL added tokens.
+  // Must be built before moving special_token_map.
+  std::unique_ptr<IRegex> special_regex;
+  {
+    auto res = detail::build_special_token_regex(special_token_map);
+    if (res.ok()) {
+      special_regex = std::move(*res);
+    }
+  }
+
   if (type == "BPE") {
-    // Model's regex: only special=true tokens (for standalone encode).
-    // HFTokenizer builds its own regex from ALL added tokens.
-    std::unique_ptr<IRegex> special_token_regex;
-    auto special_token_regex_res =
-        detail::build_special_token_regex(special_token_map);
-    if (special_token_regex_res.ok()) {
-      special_token_regex = std::move(*special_token_regex_res);
-    }
-
-    // Build merge ranks from merges
-    std::optional<detail::TokenMap> merge_ranks;
-    detail::MergeMap merge_map;
-    const auto& raw_merges = merges.value_or(std::vector<std::string>());
-    for (size_t i = 0; i < raw_merges.size(); ++i) {
-      const std::string& m = raw_merges[i];
-      if (m.rfind("#version", 0) == 0)
-        continue;
-      auto space_pos = m.find(' ');
-      if (space_pos != std::string::npos) {
-        std::string first = m.substr(0, space_pos);
-        std::string second = m.substr(space_pos + 1);
-        auto first_id = token_map.tryGetInteger(first);
-        auto second_id = token_map.tryGetInteger(second);
-        if (first_id && second_id) {
-          std::string merged = first + second;
-          auto merged_id = token_map.tryGetInteger(merged);
-          if (merged_id) {
-            merge_map.emplace(
-                std::make_pair(*first_id, *second_id),
-                std::make_pair(static_cast<uint32_t>(i), *merged_id));
-          }
-        }
-      }
-    }
-    auto merge_ranks_res = detail::build_merge_ranks_map(merge_map, token_map);
-    if (merge_ranks_res.ok()) {
-      merge_ranks.emplace(std::move(*merge_ranks_res));
-    }
-
-    return std::make_shared<BPEModel>(
-        std::move(token_map),
-        std::move(special_token_map),
-        std::move(merge_ranks),
-        std::move(special_token_regex),
-        byte_fallback.value_or(false),
-        ids.unk_token_id,
-        ids.bos_token_id,
-        ids.eos_token_id,
-        rstrip_tokens,
-        lstrip_tokens);
-
+    return create_bpe(
+        std::move(token_map), std::move(special_token_map),
+        std::move(special_regex), ids);
   } else if (type == "WordPiece") {
-    std::string unk = unk_token.value_or("[UNK]");
-    return std::make_shared<WordPieceModel>(
-        std::move(token_map),
-        std::move(special_token_map),
-        unk,
-        continuing_subword_prefix.value_or("##"),
-        max_input_chars_per_word.value_or(100),
-        ids.unk_token_id,
-        ids.bos_token_id,
-        ids.eos_token_id);
-
+    return create_wordpiece(
+        std::move(token_map), std::move(special_token_map), ids);
   } else if (type == "Unigram") {
-    const auto& vocab = unigram_vocab.value_or(UnigramVocab{});
-
-    std::vector<std::string> pieces;
-    std::vector<double> scores;
-    pieces.reserve(vocab.size());
-    scores.reserve(vocab.size());
-    for (const auto& [piece, score] : vocab) {
-      pieces.push_back(piece);
-      scores.push_back(score);
-    }
-
-    // Resolve UNK token id: explicit unk_id from JSON, or look up the
-    // unk_token string in the vocab.
-    std::optional<uint64_t> resolved_unk;
-    if (unigram_unk_id) {
-      resolved_unk = static_cast<uint64_t>(*unigram_unk_id);
-    } else if (ids.unk_token_id) {
-      resolved_unk = ids.unk_token_id;
-    }
-
-    // Model's regex: only special=true tokens.
-    std::unique_ptr<IRegex> special_token_regex;
-    auto regex_res = detail::build_special_token_regex(special_token_map);
-    if (regex_res.ok()) {
-      special_token_regex = std::move(*regex_res);
-    }
-
-    return std::make_shared<UnigramModel>(
-        std::move(pieces),
-        std::move(scores),
-        std::move(special_token_map),
-        std::move(special_token_regex),
-        byte_fallback.value_or(false),
-        resolved_unk,
-        ids.bos_token_id,
-        ids.eos_token_id,
-        rstrip_tokens,
-        lstrip_tokens);
-
+    return create_unigram(
+        std::move(special_token_map), std::move(special_regex), ids);
   } else if (type == "WordLevel") {
-    std::unique_ptr<IRegex> special_token_regex;
-    auto regex_res = detail::build_special_token_regex(special_token_map);
-    if (regex_res.ok()) {
-      special_token_regex = std::move(*regex_res);
-    }
-
-    return std::make_shared<WordLevelModel>(
-        std::move(token_map),
-        std::move(special_token_map),
-        std::move(special_token_regex),
-        ids.unk_token_id,
-        ids.bos_token_id,
-        ids.eos_token_id,
-        rstrip_tokens,
-        lstrip_tokens);
+    return create_wordlevel(
+        std::move(token_map), std::move(special_token_map),
+        std::move(special_regex), ids);
   }
 
   return nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// Per-type factory helpers
+// ---------------------------------------------------------------------------
+
+Model::Ptr ModelConfig::create_bpe(
+    detail::TokenMap token_map,
+    detail::TokenMap special_token_map,
+    std::unique_ptr<IRegex> regex,
+    const SequenceTokenIds& ids) const {
+  std::optional<detail::TokenMap> merge_ranks;
+  detail::MergeMap merge_map;
+  const auto& raw_merges = merges.value_or(std::vector<std::string>());
+  for (size_t i = 0; i < raw_merges.size(); ++i) {
+    const std::string& m = raw_merges[i];
+    if (m.rfind("#version", 0) == 0)
+      continue;
+    auto space_pos = m.find(' ');
+    if (space_pos != std::string::npos) {
+      std::string first = m.substr(0, space_pos);
+      std::string second = m.substr(space_pos + 1);
+      auto first_id = token_map.tryGetInteger(first);
+      auto second_id = token_map.tryGetInteger(second);
+      if (first_id && second_id) {
+        std::string merged = first + second;
+        auto merged_id = token_map.tryGetInteger(merged);
+        if (merged_id) {
+          merge_map.emplace(
+              std::make_pair(*first_id, *second_id),
+              std::make_pair(static_cast<uint32_t>(i), *merged_id));
+        }
+      }
+    }
+  }
+  auto merge_ranks_res = detail::build_merge_ranks_map(merge_map, token_map);
+  if (merge_ranks_res.ok()) {
+    merge_ranks.emplace(std::move(*merge_ranks_res));
+  }
+
+  return std::make_unique<BPEModel>(
+      std::move(token_map),
+      std::move(special_token_map),
+      std::move(merge_ranks),
+      std::move(regex),
+      byte_fallback.value_or(false),
+      ids.unk_token_id,
+      ids.bos_token_id,
+      ids.eos_token_id,
+      rstrip_tokens,
+      lstrip_tokens);
+}
+
+Model::Ptr ModelConfig::create_wordpiece(
+    detail::TokenMap token_map,
+    detail::TokenMap special_token_map,
+    const SequenceTokenIds& ids) const {
+  return std::make_unique<WordPieceModel>(
+      std::move(token_map),
+      std::move(special_token_map),
+      unk_token.value_or("[UNK]"),
+      continuing_subword_prefix.value_or("##"),
+      max_input_chars_per_word.value_or(100),
+      ids.unk_token_id,
+      ids.bos_token_id,
+      ids.eos_token_id,
+      rstrip_tokens,
+      lstrip_tokens);
+}
+
+Model::Ptr ModelConfig::create_unigram(
+    detail::TokenMap special_token_map,
+    std::unique_ptr<IRegex> regex,
+    const SequenceTokenIds& ids) const {
+  const auto& vocab = unigram_vocab.value_or(UnigramVocab{});
+
+  std::vector<std::string> pieces;
+  std::vector<double> scores;
+  pieces.reserve(vocab.size());
+  scores.reserve(vocab.size());
+  for (const auto& [piece, score] : vocab) {
+    pieces.push_back(piece);
+    scores.push_back(score);
+  }
+
+  std::optional<uint64_t> resolved_unk;
+  if (unigram_unk_id) {
+    resolved_unk = static_cast<uint64_t>(*unigram_unk_id);
+  } else if (ids.unk_token_id) {
+    resolved_unk = ids.unk_token_id;
+  }
+
+  return std::make_unique<UnigramModel>(
+      std::move(pieces),
+      std::move(scores),
+      std::move(special_token_map),
+      std::move(regex),
+      byte_fallback.value_or(false),
+      resolved_unk,
+      ids.bos_token_id,
+      ids.eos_token_id,
+      rstrip_tokens,
+      lstrip_tokens);
+}
+
+Model::Ptr ModelConfig::create_wordlevel(
+    detail::TokenMap token_map,
+    detail::TokenMap special_token_map,
+    std::unique_ptr<IRegex> regex,
+    const SequenceTokenIds& ids) const {
+  return std::make_unique<WordLevelModel>(
+      std::move(token_map),
+      std::move(special_token_map),
+      std::move(regex),
+      ids.unk_token_id,
+      ids.bos_token_id,
+      ids.eos_token_id,
+      rstrip_tokens,
+      lstrip_tokens);
 }
 
 } // namespace tokenizers
