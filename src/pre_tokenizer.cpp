@@ -390,14 +390,6 @@ ByteLevelPreTokenizer::ByteLevelPreTokenizer(
 
 std::vector<std::string> ByteLevelPreTokenizer::pre_tokenize(
     const std::string& input) const {
-  if (!use_regex_) {
-    std::string encoded;
-    for (unsigned char byte : input) {
-      encoded += unicode_byte_to_utf8(byte);
-    }
-    return {encoded};
-  }
-
   std::string formatted_input = input;
   if (add_prefix_space_ && !formatted_input.empty() &&
       formatted_input[0] != ' ') {

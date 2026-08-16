@@ -149,11 +149,12 @@ TEST_F(SequencePreTokenizerTest, PreTokenizeSplitThenByteLevelNoRegex) {
   // letter run ("foo(bar" -> ["foo", "(bar"]); with use_regex=false ByteLevel
   // keeps "(bar" whole. The default ByteLevel would further split it into
   // "(" and "bar", which is the bug this fix corrects.
-  PreTokenizer::Ptr split = std::make_shared<RegexPreTokenizer>(
-      R"((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+)");
-  PreTokenizer::Ptr byte_no_regex = std::make_shared<ByteLevelPreTokenizer>(
-      /*add_prefix_space=*/false, /*pattern=*/"", /*use_regex=*/false);
-  SequencePreTokenizer ptok({split, byte_no_regex});
+  std::vector<PreTokenizer::Ptr> ptoks;
+  ptoks.push_back(std::make_unique<RegexPreTokenizer>(
+      R"((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+)"));
+  ptoks.push_back(std::make_unique<ByteLevelPreTokenizer>(
+      /*add_prefix_space=*/false, /*pattern=*/"", /*use_regex=*/false));
+  SequencePreTokenizer ptok(std::move(ptoks));
   assert_split_match(ptok, "foo(bar", {"foo", "(bar"});
 }
 
