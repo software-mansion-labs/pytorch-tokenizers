@@ -10,6 +10,7 @@
 #include <pytorch/tokenizers/bpe_model.h>
 
 #include <limits>
+#include <queue>
 
 #include <pytorch/tokenizers/log.h>
 
@@ -30,65 +31,129 @@ struct HFWord {
     return tokens.size();
   }
 
-  // Apply all possible merges using the merge ranks
+  // Apply all possible merges using the merge ranks.
+  //
+  // Mirrors HuggingFace's Word::merge_all: an intrusive doubly linked list over
+  // the symbols plus a min-heap keyed on merge rank, giving O(n log n) instead
+  // of the naive rescan-all-pairs O(n^2) this used to do. Ported from upstream
+  // tokenizers' HFWord::merge_all, adapted because our merge table is keyed by
+  // the merged token string rather than by an (id, id) pair.
   void merge_all(
       const detail::TokenMap& merge_ranks,
       const detail::TokenMap& token_map) {
-    while (tokens.size() > 1) {
-      std::optional<std::pair<size_t, uint32_t>> best_merge;
-
-      // Find the best merge (lowest rank) among adjacent token pairs
-      for (size_t i = 0; i < tokens.size() - 1; ++i) {
-        // Create the merged token string to look up its rank
-        auto first_token = token_map.tryGetString(tokens[i]);
-        auto second_token = token_map.tryGetString(tokens[i + 1]);
-
-        if (first_token && second_token) {
-          std::string merged_token;
-          merged_token.reserve(first_token->size() + second_token->size());
-          merged_token += *first_token;
-          merged_token += *second_token;
-          auto rank = merge_ranks.tryGetInteger(merged_token);
-
-          if (rank && (!best_merge || *rank < best_merge->second)) {
-            best_merge = std::make_pair(i, static_cast<uint32_t>(*rank));
-          }
-        }
-      }
-
-      if (!best_merge) {
-        break; // No more merges possible
-      }
-
-      // Apply the best merge
-      size_t merge_idx = best_merge->first;
-
-      // Get the merged token ID
-      auto first_token = token_map.tryGetString(tokens[merge_idx]);
-      auto second_token = token_map.tryGetString(tokens[merge_idx + 1]);
-
-      if (first_token && second_token) {
-        std::string merged_token;
-        merged_token.reserve(first_token->size() + second_token->size());
-        merged_token += *first_token;
-        merged_token += *second_token;
-        auto merged_id = token_map.tryGetInteger(merged_token);
-
-        if (merged_id) {
-          // Replace the two tokens with the merged token
-          tokens[merge_idx] = *merged_id;
-          byte_lengths[merge_idx] += byte_lengths[merge_idx + 1];
-
-          // Remove the second token
-          tokens.erase(tokens.begin() + merge_idx + 1);
-          byte_lengths.erase(byte_lengths.begin() + merge_idx + 1);
-        } else {
-          break; // Merged token not found in vocabulary
-        }
-      } else {
-        break; // Original tokens not found in vocabulary
-      }
+    const size_t n = tokens.size();
+    if (n < 2) {
+      return;
     }
+
+    std::vector<int64_t> prev(n), next(n);
+    std::vector<uint32_t> version(n, 0);
+    std::vector<bool> alive(n, true);
+    for (size_t i = 0; i < n; ++i) {
+      prev[i] = static_cast<int64_t>(i) - 1;
+      next[i] = (i + 1 < n) ? static_cast<int64_t>(i + 1) : -1;
+    }
+
+    // Rank and resulting id for the pair (tokens[i], tokens[j]).
+    auto pair_lookup =
+        [&](int64_t i,
+            int64_t j) -> std::optional<std::pair<uint64_t, uint64_t>> {
+      const auto first_token = token_map.tryGetString(tokens[i]);
+      const auto second_token = token_map.tryGetString(tokens[j]);
+      if (!first_token || !second_token) {
+        return std::nullopt;
+      }
+      std::string merged_token;
+      merged_token.reserve(first_token->size() + second_token->size());
+      merged_token += *first_token;
+      merged_token += *second_token;
+
+      const auto rank = merge_ranks.tryGetInteger(merged_token);
+      if (!rank) {
+        return std::nullopt;
+      }
+      const auto merged_id = token_map.tryGetInteger(merged_token);
+      if (!merged_id) {
+        return std::nullopt;
+      }
+      return std::make_pair(*rank, *merged_id);
+    };
+
+    // (rank, pos, version): lowest rank wins, ties broken by leftmost position
+    // to match left-to-right BPE order. `version` tracks only the left symbol;
+    // a candidate whose right neighbor changed is rejected below by recomputing
+    // the pair's rank and comparing to `c.rank`. That check relies on merge
+    // ranks being unique (they are merge indices), so a changed pair cannot
+    // coincidentally carry the same rank.
+    struct Candidate {
+      uint64_t rank;
+      int64_t pos;
+      uint32_t version;
+    };
+    struct Compare {
+      bool operator()(const Candidate& a, const Candidate& b) const {
+        if (a.rank != b.rank) {
+          return a.rank > b.rank;
+        }
+        return a.pos > b.pos;
+      }
+    };
+    std::priority_queue<Candidate, std::vector<Candidate>, Compare> heap;
+
+    auto push_pair = [&](int64_t i) {
+      if (i < 0 || next[i] < 0) {
+        return;
+      }
+      if (const auto found = pair_lookup(i, next[i])) {
+        heap.push({found->first, i, version[i]});
+      }
+    };
+
+    for (size_t i = 0; i + 1 < n; ++i) {
+      push_pair(static_cast<int64_t>(i));
+    }
+
+    while (!heap.empty()) {
+      const Candidate c = heap.top();
+      heap.pop();
+      const int64_t i = c.pos;
+      if (!alive[i] || version[i] != c.version || next[i] < 0) {
+        continue; // stale entry
+      }
+      const int64_t j = next[i];
+      const auto found = pair_lookup(i, j);
+      if (!found || found->first != c.rank) {
+        continue; // superseded by a different merge at this position
+      }
+
+      // Merge j into i.
+      tokens[i] = found->second;
+      byte_lengths[i] += byte_lengths[j];
+      alive[j] = false;
+      const int64_t jn = next[j];
+      next[i] = jn;
+      if (jn >= 0) {
+        prev[jn] = i;
+      }
+      ++version[i];
+
+      // Only the two adjacencies touching the merged symbol can change.
+      push_pair(prev[i]);
+      push_pair(i);
+    }
+
+    // Compact surviving symbols in list order (head is always index 0; it is
+    // only ever a left operand, never removed).
+    std::vector<uint64_t> merged_tokens;
+    std::vector<size_t> merged_byte_lengths;
+    merged_tokens.reserve(tokens.size());
+    merged_byte_lengths.reserve(byte_lengths.size());
+    for (int64_t i = 0; i != -1; i = next[i]) {
+      merged_tokens.push_back(tokens[i]);
+      merged_byte_lengths.push_back(byte_lengths[i]);
+    }
+    tokens = std::move(merged_tokens);
+    byte_lengths = std::move(merged_byte_lengths);
   }
 };
 } // namespace
