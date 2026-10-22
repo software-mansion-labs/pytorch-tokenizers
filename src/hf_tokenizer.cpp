@@ -193,9 +193,25 @@ Result<std::string> HFTokenizer::decode(
     uint64_t prev_token,
     uint64_t token,
     bool skip_special_tokens) const {
-  (void)prev_token;
   if (!initialized_) {
     return Error::Uninitialized;
+  }
+
+  // A decoder chain is defined over the whole sequence: SentencePiece-style
+  // tokenizers end it with Fuse + Strip, which drop the space only at the
+  // start of the text. Run on one token, they strip the space every Metaspace
+  // piece carries, so a streamed sequence loses all its word breaks. Decode
+  // the token together with its predecessor and keep what it adds instead,
+  // as HF tokenizers' DecodeStream does. After a special token (e.g. BOS) the
+  // token starts the text, which is what decoding it alone means.
+  if (decoder_ && !model_->is_special_token(prev_token)) {
+    auto prev = decode(std::vector<uint64_t>{prev_token}, skip_special_tokens);
+    auto both =
+        decode(std::vector<uint64_t>{prev_token, token}, skip_special_tokens);
+    if (prev.ok() && both.ok() &&
+        both.get().compare(0, prev.get().size(), prev.get()) == 0) {
+      return both.get().substr(prev.get().size());
+    }
   }
 
   if (skip_special_tokens && model_->is_special_token(token)) {
