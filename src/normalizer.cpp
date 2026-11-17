@@ -258,8 +258,23 @@ std::string SequenceNormalizer::normalize(const std::string& input) const {
 // NFC
 // =============================================================================
 
+namespace {
+
+// llama.cpp-unicode's NFC, which is built from the Unicode tables (Hangul
+// composition and composition exclusions included).
+std::string normalize_nfc(const std::string& input) {
+  std::string result;
+  for (uint32_t cpt :
+       unicode_cpts_normalize_nfc(unicode_cpts_from_utf8(input))) {
+    result += unicode_cpt_to_utf8(cpt);
+  }
+  return result;
+}
+
+} // namespace
+
 std::string NFCNormalizer::normalize(const std::string& input) const {
-  return unicode_normalize_nfc_utf8(input);
+  return normalize_nfc(input);
 }
 
 // =============================================================================
@@ -291,7 +306,7 @@ std::string NFKCNormalizer::normalize(const std::string& input) const {
         "tables. For SentencePiece models, use the Precompiled normalizer.");
     warned = true;
   }
-  return unicode_normalize_nfc_utf8(input);
+  return normalize_nfc(input);
 }
 
 std::string NFKDNormalizer::normalize(const std::string& input) const {

@@ -665,7 +665,7 @@ TEST(NormalizerAdversarialTest, BertNormalizerAllFlags) {
   EXPECT_NE(result.find("hello"), std::string::npos);
   // Should not contain control char
   EXPECT_EQ(result.find('\x01'), std::string::npos);
-
+}
 
 TEST(NormalizerTest, NFCNormalizerCanonicalComposition) {
   NFCNormalizer normalizer;
